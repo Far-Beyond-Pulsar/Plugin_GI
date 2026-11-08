@@ -169,7 +169,7 @@ fn scene(gpu: &Gpu, quads: &[Quad]) -> Scene {
         )
         .unwrap();
         inputs.push(TlasInstanceInput {
-            mesh_id: k as u64,
+            geometry_id: k as u64,
             transform: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         });
     }
