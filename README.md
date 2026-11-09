@@ -20,13 +20,14 @@ draw phases and api crates.
 | Crate | Path | What |
 |---|---|---|
 | `helio-gi-api` | `api/` | The GI plugin's public contract: the probe clipmap's layout, the rays, hits and irradiance it publishes, and the WGSL that reads them (a terrain that traces the probes reads it). |
-| `gi_component` | `component/` | GI (pulsar.gi): the registrations of the plugin's Helio feature (the probe clipmap) and its settings. GI has no SceneDB component: a scene's tracers (meshes, a voxel terrain) feed it. |
-| `gi_plugin` | `editor/` | GI (pulsar.gi): the editor plugin -- its metadata, over the plugin's component crate |
+| `gi_plugin` | `./` (`src/`) | The plugin's root crate: the one place it registers everything it contributes (`src/runtime.rs`: the feature set, its configuration from the project's GI settings, and the settings group). GI has no SceneDB component and no editor UI, so it has no component or editor crate. |
 | `gi-examples` | `examples/` | The GI plugin's standalone hosts on Helio: the indoor cathedral lit by the probes |
 | `helio-pass-gi` | `feature/` | Helio world-space diffuse global illumination: a probe clipmap traced by the scene's tracers |
 
-- **Runtime module** (what a game built for a project links): `gi_component`.
-- **Editor module** (what the editor links in addition): `gi_plugin`.
+- **Root crate** `gi_plugin`: the only crate that registers anything (the
+  Helio feature and its settings group; GI registers nothing for the
+  editor). A game links it without `editor`; the editor links it with. Other
+  plugins never depend on it, only on `helio-gi-api`.
 - **Requires**: nothing. A project enables or disables the plugin in its
   `Pulsar.toml` (`[plugins]`); disabled, the kind is absent and the frame
   draws without it.
@@ -44,8 +45,8 @@ only inside a Pulsar-Native checkout:
 ```bash
 git clone --recursive https://github.com/Far-Beyond-Pulsar/Pulsar-Native
 cd Pulsar-Native
-cargo check -p helio-gi-api -p gi_component -p gi_plugin -p gi-examples -p helio-pass-gi --tests
-cargo test -p helio-gi-api -p gi_component -p helio-pass-gi
+cargo check -p helio-gi-api -p gi_plugin --features gi_plugin/editor -p gi-examples -p helio-pass-gi --tests
+cargo test -p helio-gi-api -p gi_plugin -p helio-pass-gi
 ```
 
 Suites that render real frames need a GPU; CI leaves them out by name

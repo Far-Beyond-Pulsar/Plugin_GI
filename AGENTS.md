@@ -29,8 +29,8 @@ rather than copying rules here.
 ## Key commands (from the Pulsar-Native root)
 
 ```
-cargo check -p helio-gi-api -p gi_component -p gi_plugin -p gi-examples -p helio-pass-gi --tests
-cargo test -p helio-gi-api -p gi_component -p helio-pass-gi
+cargo check -p helio-gi-api -p gi_plugin -p gi-examples -p helio-pass-gi --tests
+cargo test -p helio-gi-api -p gi_plugin -p helio-pass-gi
 cargo test -p one_owner          every concept has one owner (scans this plugin)
 cargo test -p installed_plugins  the installed set and absent plugins
 ```
