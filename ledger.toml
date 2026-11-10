@@ -1,0 +1,18 @@
+# The gi plugin's rows of the SceneDB closure ledger (Pulsar-Native#1035):
+# its classes, GPU schemas, buffers, pass crates and call sites. A plugin owns
+# the rows of what it ships (Pulsar-Native#1606); `cargo test -p scene_inventory`
+# in a Pulsar-Native checkout recomputes every fact column, checks the human
+# columns, and fails on a missing, stale or misplaced row. The columns are
+# described in Pulsar-Native's crates/core/scene_inventory/ledger.toml.
+
+# ── Render pass crates ──────────────────────────────────────────
+
+[[pass]]
+crate = "helio-pass-gi"
+in_default_graph = false
+reads = []
+owner = "helio-pass-gi"
+disposition = "keep: the kind's own, moved with it into its plugin (plugin-migration.md Phases B and C)"
+target_contract = "Phase C; plugin-migration.md"
+test = "none: no test names this row; the owning plugin's suites cover its behaviour"
+status = "unverified"
