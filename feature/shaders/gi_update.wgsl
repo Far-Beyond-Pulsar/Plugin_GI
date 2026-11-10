@@ -62,7 +62,7 @@ fn gi_sun_main() {
 fn sky_radiance(from_camera: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
     if atmosphere.planet.w < 0.5 { return select(frame_gi.ground.rgb, frame_gi.sky.rgb, d.y >= 0.0); }
     // The basis over each band's convolution (1, 2/3, 1/4).
-    return atmosphere_sky_table_eval(atmosphere, from_camera, d, vec3<f32>(1.0, 1.5, 4.0));
+    return atmosphere_sky_table_eval(from_camera, d, vec3<f32>(1.0, 1.5, 4.0));
 }
 
 // Probes that came into the clipmap (after `gi_integrate`, which may have

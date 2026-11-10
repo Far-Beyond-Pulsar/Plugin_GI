@@ -1008,6 +1008,11 @@ mod shader_tests {
         )
         .validate(&module)
         .unwrap_or_else(|e| panic!("{label}: {}", e.emit_to_string(&text)));
+        // Every probe ray or pixel runs these: no per-frame table (the
+        // atmosphere's directional lights) indexed through a value, which
+        // copies the whole table per invocation.
+        let copies = helio_core::shader::value_array_copies(&text).unwrap();
+        assert!(copies.is_empty(), "{label}: {copies:#?}");
     }
 
     #[test]
