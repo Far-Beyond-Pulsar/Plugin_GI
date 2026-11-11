@@ -28,6 +28,11 @@ pulsar_settings = { workspace = true }
 
 [dev-dependencies]
 wgpu = { workspace = true }
+helio-core = { workspace = true }
+helio-graph-asset = { workspace = true }
+helio-presets = { workspace = true }
+pulsar_scenedb = { workspace = true }
+pollster = "=0.4.0"
 
 [lints]
 workspace = true

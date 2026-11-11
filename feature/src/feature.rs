@@ -103,7 +103,7 @@ impl Feature for GiFeature {
             node(
                 "gi_resolve",
                 "GI: Resolve",
-                "The probes' irradiance at every pixel (the frame's indirect diffuse) for the lighting.                  Builds nothing where the lighting ran before it (forward).",
+                "The probes' irradiance at every pixel (the frame's indirect diffuse) for the lighting. Builds nothing where the lighting ran before it (forward).",
                 |build| {
                     let read = inputs_order(build.env) == InputsOrder::BeforeLighting;
                     if read && settings(build).active(build.env.device, terrain_traced(build)) {
