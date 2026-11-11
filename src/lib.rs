@@ -31,5 +31,4 @@ pub fn build(p: &mut pulsar_plugins::PluginBuilder) {
     runtime::build(p);
 }
 
-
 pub mod runtime;

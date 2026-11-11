@@ -10,7 +10,7 @@
 [[pass]]
 crate = "helio-pass-gi"
 in_default_graph = false
-reads = []
+reads = ["builtin_mesh_index", "builtin_mesh_vertex", "directional_lights", "materials", "scene_lights"]
 owner = "helio-pass-gi"
 disposition = "keep: the kind's own, moved with it into its plugin (plugin-migration.md Phases B and C)"
 target_contract = "Phase C; plugin-migration.md"

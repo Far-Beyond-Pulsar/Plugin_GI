@@ -69,14 +69,12 @@ mod tests {
             .into_iter()
             .filter(|summary| summary.origin == pulsar_plugins::origin!())
             .collect();
-        assert!(
-            ours.iter()
-                .any(|summary| summary.category == "render.features")
-        );
-        assert!(
-            ours.iter()
-                .any(|summary| summary.category == "settings.group")
-        );
+        assert!(ours
+            .iter()
+            .any(|summary| summary.category == "render.features"));
+        assert!(ours
+            .iter()
+            .any(|summary| summary.category == "settings.group"));
         for summary in &ours {
             assert_eq!(
                 pulsar_plugins::plugin_of(summary.origin).map(|plugin| plugin.id.as_str()),
