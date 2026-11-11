@@ -21,21 +21,20 @@ fn configure_renderer(config: helio::RendererConfig) -> helio::RendererConfig {
     ))
 }
 
-// The probe clipmap, configured from the project's GI settings.
-inventory::submit! {
-    RenderFeatureRegistration {
-        origin: pulsar_plugins::origin!(),
+/// Everything the plugin registers for a game (and the editor).
+pub(crate) fn build(p: &mut pulsar_plugins::PluginBuilder) {
+    // The probe clipmap, configured from the project's GI settings.
+    p.add(RenderFeatureRegistration {
+        origin: p.origin(),
         features: render_features,
         configure: configure_renderer,
-    }
-}
+    });
 
-// The project's `gi` settings group.
-inventory::submit! {
-    SettingsGroupRegistration {
-        origin: pulsar_plugins::origin!(),
+    // The project's `gi` settings group.
+    p.add(SettingsGroupRegistration {
+        origin: p.origin(),
         group: &helio_pass_gi::GI,
-    }
+    });
 }
 
 #[cfg(test)]

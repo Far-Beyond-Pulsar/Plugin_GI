@@ -53,6 +53,11 @@ impl Feature for GiFeature {
     }
 
     fn register(&self, registrar: &mut FeatureRegistrar<'_>) {
+        registrar.consumes(helio_light_api::DIRECTIONAL_LIGHTS_ROW);
+        registrar.consumes(helio_mesh_api::MESH_VERTICES);
+        registrar.consumes(helio_mesh_api::MESH_INDICES);
+        registrar.consumes(helio_light_api::SCENE_LIGHTS);
+        registrar.consumes(helio_mats::MATERIALS);
         // What shader hot reload may swap without rebuilding the graph.
         registrar.swappable::<GiPass>();
         registrar.swappable::<GiMeshTracePass>();

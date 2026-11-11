@@ -604,9 +604,7 @@ impl RenderPass for GiPass {
             .cloned();
         let directional = ctx
             .scene_buffers
-            .get(helio_core::BufferKey::of(
-                helio_light_api::DIRECTIONAL_LIGHTS,
-            ))
+            .get(helio_light_api::DIRECTIONAL_LIGHTS_ROW.key())
             .map(|h| h.buffer.clone());
         let sun = self.sun_transmittance.and_then(|sun| {
             ctx.registry
