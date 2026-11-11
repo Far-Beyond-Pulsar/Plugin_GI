@@ -6,7 +6,17 @@ id = "pulsar.gi"
 name = "Global Illumination"
 description = "World-space diffuse GI: the probe clipmap the scene's tracers feed, and its settings"
 enabled_by_default = true
-requires = []
+provides = [
+    { id = "pulsar.gi.api", kind = "api", members = ["helio-gi-api"], version = 1 },
+]
+requires = [
+    { id = "pulsar.lights.rows", optional = true },
+    { id = "pulsar.lights.api", optional = true },
+    { id = "pulsar.materials.table", optional = true },
+    { id = "pulsar.materials.api", optional = true },
+    { id = "pulsar.meshes.rows", optional = true },
+    { id = "pulsar.meshes.api", optional = true },
+]
 
 # The plugin's root crate (the package in this directory): the one place it
 # registers everything it contributes. A game links it without its `editor`

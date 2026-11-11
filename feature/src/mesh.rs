@@ -492,7 +492,7 @@ impl RenderPass for GiMeshTracePass {
         ) else {
             return Ok(());
         };
-        let lights = pool(helio_core::BufferKey::of(helio_light_api::LIGHT_LIST));
+        let lights = pool(helio_light_api::SCENE_LIGHTS.key());
         let proxy = |name: &'static str| ctx.registry.get::<&wgpu::Buffer>(ResourceKey::new(name));
         let proxies =
             proxy(helio_mesh_api::RAY_PROXY_VERTICES).zip(proxy(helio_mesh_api::RAY_PROXY_INDICES));
