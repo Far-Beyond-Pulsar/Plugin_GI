@@ -20,8 +20,7 @@ use glam::{DVec3, Vec3};
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, ResourceKey, Result as HelioResult};
 use helio_frame_api::lighting::sky::{
-    ATMOSPHERE_FRAME, ATMOSPHERE_FRAME_BYTES, ATMOSPHERE_SKY_TABLE, ATMOSPHERE_SKY_TABLE_BYTES,
-    ATMOSPHERE_SKY_TABLE_SNIPPET, ATMOSPHERE_SNIPPET,
+    SKY_FRAME, SKY_FRAME_BYTES, SKY_SNIPPET, SKY_TABLE, SKY_TABLE_BYTES, SKY_TABLE_SNIPPET,
 };
 use helio_frame_api::lighting::sun_transmittance::{self, SunTransmittance};
 use std::collections::VecDeque;
@@ -262,8 +261,8 @@ impl GiPass {
                 storage(4, true),
                 storage(5, false),
                 storage(6, true),
-                uniform(7, ATMOSPHERE_FRAME_BYTES),
-                uniform(8, ATMOSPHERE_SKY_TABLE_BYTES),
+                uniform(7, SKY_FRAME_BYTES),
+                uniform(8, SKY_TABLE_BYTES),
                 storage(9, true),
                 wgpu::BindGroupLayoutEntry {
                     binding: 10,
@@ -283,8 +282,8 @@ impl GiPass {
             "GI update",
             helio_core::include_wgsl!("../shaders/gi_update.wgsl"),
             &[
-                ATMOSPHERE_SNIPPET,
-                ATMOSPHERE_SKY_TABLE_SNIPPET,
+                SKY_SNIPPET,
+                SKY_TABLE_SNIPPET,
                 GI_COMMON_SNIPPET,
                 GI_SAMPLE_SNIPPET,
                 sun_transmittance::SNIPPET,
@@ -319,18 +318,8 @@ impl GiPass {
             reset: pipeline("gi_reset"),
             rays: pipeline("gi_rays_main"),
             layout,
-            fallback_atmosphere: buffer(
-                device,
-                "GI no atmosphere",
-                ATMOSPHERE_FRAME_BYTES,
-                uniform,
-            ),
-            fallback_sky_table: buffer(
-                device,
-                "GI no sky table",
-                ATMOSPHERE_SKY_TABLE_BYTES,
-                uniform,
-            ),
+            fallback_atmosphere: buffer(device, "GI no atmosphere", SKY_FRAME_BYTES, uniform),
+            fallback_sky_table: buffer(device, "GI no sky table", SKY_TABLE_BYTES, uniform),
             fallback_directional: buffer(
                 device,
                 "GI no directional lights",
@@ -541,7 +530,7 @@ impl RenderPass for GiPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        let mut reads = vec![ATMOSPHERE_FRAME, ATMOSPHERE_SKY_TABLE];
+        let mut reads = vec![SKY_FRAME, SKY_TABLE];
         if let Some(sun) = self.sun_transmittance {
             reads.extend([sun.map, sun.frame]);
         }
@@ -596,11 +585,11 @@ impl RenderPass for GiPass {
         }
         let atmosphere = ctx
             .registry
-            .get::<&wgpu::Buffer>(ResourceKey::new(ATMOSPHERE_FRAME))
+            .get::<&wgpu::Buffer>(ResourceKey::new(SKY_FRAME))
             .cloned();
         let sky_table = ctx
             .registry
-            .get::<&wgpu::Buffer>(ResourceKey::new(ATMOSPHERE_SKY_TABLE))
+            .get::<&wgpu::Buffer>(ResourceKey::new(SKY_TABLE))
             .cloned();
         let directional = ctx
             .scene_buffers
@@ -1019,8 +1008,8 @@ mod shader_tests {
             "gi_update",
             include_str!("../shaders/gi_update.wgsl"),
             &[
-                ATMOSPHERE_SNIPPET,
-                ATMOSPHERE_SKY_TABLE_SNIPPET,
+                SKY_SNIPPET,
+                SKY_TABLE_SNIPPET,
                 GI_COMMON_SNIPPET,
                 GI_SAMPLE_SNIPPET,
                 sun_transmittance::SNIPPET,

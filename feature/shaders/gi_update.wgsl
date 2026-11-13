@@ -1,6 +1,6 @@
 //!use light_list
-//!use atmosphere
-//!use atmosphere_sky_table
+//!use frame_sky
+//!use sky_table
 //!use gi_common
 //!use gi_sample
 //!use sun_transmittance
@@ -20,8 +20,8 @@
 // The lights' directional lights (`helio_light_api::DIRECTIONAL_LIGHTS`),
 // the first the primary sun.
 @group(0) @binding(6) var<storage, read> directional: DirectionalLights;
-@group(0) @binding(7) var<uniform> atmosphere: AtmosphereFrame;
-@group(0) @binding(8) var<uniform> atmosphere_sky_table: array<vec4<f32>, 2304>;
+@group(0) @binding(7) var<uniform> sky_frame: SkyFrame;
+@group(0) @binding(8) var<uniform> sky_table: array<vec4<f32>, 2304>;
 // A ray's hit's light beyond the sun's and the probes' (`GiMeshTracePass`:
 // the scene's lights on it, the light it gives off), radiance RGB in half
 // floats; zero where no tracer wrote any.
@@ -40,10 +40,10 @@ const LUMINANCE: vec3<f32> = vec3<f32>(0.2126, 0.7152, 0.0722);
 // lights' primary sun.
 @compute @workgroup_size(1)
 fn gi_sun_main() {
-    if atmosphere.planet.w > 0.5 {
-        let towards = atmosphere.sun.xyz;
+    if sky_frame.planet.w > 0.5 {
+        let towards = sky_frame.sun.xyz;
         gi_sun[0] = vec4<f32>(towards, 0.0);
-        gi_sun[1] = vec4<f32>(atmosphere.sun_illuminance.rgb * atmosphere_transmittance_towards(atmosphere, vec3<f32>(0.0), towards), 0.0);
+        gi_sun[1] = vec4<f32>(sky_frame.sun_illuminance.rgb * sky_transmittance_towards(sky_frame, vec3<f32>(0.0), towards), 0.0);
         return;
     }
     if directional.count.x > 0u {
@@ -60,9 +60,9 @@ fn gi_sun_main() {
 // L2 harmonics, cosine-convolved) back to radiance, band by band; without
 // an atmosphere, the flat sky and ground.
 fn sky_radiance(from_camera: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
-    if atmosphere.planet.w < 0.5 { return select(frame_gi.ground.rgb, frame_gi.sky.rgb, d.y >= 0.0); }
+    if sky_frame.planet.w < 0.5 { return select(frame_gi.ground.rgb, frame_gi.sky.rgb, d.y >= 0.0); }
     // The basis over each band's convolution (1, 2/3, 1/4).
-    return atmosphere_sky_table_eval(from_camera, d, vec3<f32>(1.0, 1.5, 4.0));
+    return sky_table_eval(from_camera, d, vec3<f32>(1.0, 1.5, 4.0));
 }
 
 // Probes that came into the clipmap (after `gi_integrate`, which may have
