@@ -535,6 +535,8 @@ pub fn features() -> helio_feature_api::FeatureSet {
     helio_feature_api::FeatureSet::new()
         .with(helio_pass_sky::SkyFeature)
         .with(helio_pass_gi::GiFeature)
+        // Baked lighting: adds its nodes once the cathedral is baked.
+        .extended(&helio_bake_host::features())
 }
 
 /// The deferred preset with the lighting plugins' features.
