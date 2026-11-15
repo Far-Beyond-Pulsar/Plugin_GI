@@ -707,14 +707,13 @@ fn cut_out_materials(
         ..Default::default()
     });
     let views = vec![&view; binding.max_textures];
-    let samplers = vec![&sampler; binding.max_textures];
     mesh.materials(
         &gpu.device,
         &rows,
         helio_mats::MaterialTextureBindings {
             material_textures: &metadata,
             texture_views: &views,
-            samplers: &samplers,
+            sampler: &sampler,
             version: 0,
         },
     )
