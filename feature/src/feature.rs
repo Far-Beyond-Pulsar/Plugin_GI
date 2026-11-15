@@ -76,6 +76,12 @@ impl Feature for GiFeature {
                         let pass = GiPass::new(build.env.device, settings.config(traced))
                             .with_sun_transmittance(sun);
                         build.graph.add_pass(Box::new(pass));
+                    } else {
+                        log::warn!(
+                            "GI is off: nothing can trace the probes. A voxel terrain traces them; \
+                             meshes need hardware ray queries, which this device was created without \
+                             (the host's hardware ray query opt-in)"
+                        );
                     }
                     Ok(())
                 },
