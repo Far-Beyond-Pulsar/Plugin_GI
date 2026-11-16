@@ -80,6 +80,7 @@ impl Feature for GiFeature {
                     Ok(())
                 },
             )
+            .once_per_frame()
             .before_phase(Phase::GBuffer, 10),
         );
         registrar.node(
@@ -97,6 +98,7 @@ impl Feature for GiFeature {
                     Ok(())
                 },
             )
+            .once_per_frame()
             .in_slot(Slot::Geometry, 20),
         );
         registrar.node(
