@@ -43,7 +43,9 @@ impl GiSettings {
 pub static GI: Group = Group {
     key: "gi",
     title: "Global Illumination",
-    description: "World-space diffuse GI: the probe clipmap",
+    description: "World-space diffuse GI: the probe clipmap. A voxel terrain traces the probes; \
+                  meshes trace them with hardware ray queries, which the host must enable on its \
+                  device (its hardware ray query opt-in)",
     settings: &[number(
         "probe_spacing",
         "GI Probe Spacing",

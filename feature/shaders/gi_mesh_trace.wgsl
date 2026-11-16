@@ -88,7 +88,13 @@ const MESH_TRACER: u32 = 2u;
 // Flag: a shadow ray ends at its first opaque hit.
 const FIRST_HIT: u32 = 0x04u;
 
-// Whether instance `i` is a cut-out.
+// A hit's row of `instances`: its instance's first row (custom data) plus its
+// segment (a BLAS holds a mesh's sections as segments, one row each).
+fn ray_row(c: RayIntersection) -> u32 {
+    return c.instance_custom_data + c.geometry_index;
+}
+
+// Whether row `i` is a cut-out.
 fn is_cut_out(i: u32) -> bool {
     return i < arrayLength(&instances) && (instances[i].flags & RAY_INSTANCE_MASKED) != 0u;
 }
@@ -104,7 +110,7 @@ fn is_cut_out(i: u32) -> bool {
 // cutoff would let its thin leaves vanish as their mips fall below it. A
 // single-sided cut-out is not there from behind (the raster culls it).
 fn cut_out_surface(c: RayIntersection, dir: vec3<f32>, width: f32, seed: u32) -> bool {
-    let instance = instances[c.instance_index];
+    let instance = instances[ray_row(c)];
     let t = ray_triangle(instance, c.primitive_index);
     let o = t.corners;
     let uv = t.uv;
@@ -149,13 +155,13 @@ fn transmittance(start: vec3<f32>, towards: vec3<f32>, distance: f32, width: f32
     var cut_outs = 0u;
     while rayQueryProceed(&q) {
         let sheet = rayQueryGetCandidateIntersection(&q);
-        if is_cut_out(sheet.instance_index) {
+        if is_cut_out(ray_row(sheet)) {
             cut_outs++;
             if cut_outs <= MAX_CUT_OUTS && !cut_out_surface(sheet, towards, width, seed) { continue; }
             rayQueryTerminate(&q);
             return vec3<f32>(0.0);
         }
-        through *= select(vec3<f32>(0.0), instances[sheet.instance_index].transmission.rgb, sheet.instance_index < arrayLength(&instances));
+        through *= select(vec3<f32>(0.0), instances[ray_row(sheet)].transmission.rgb, ray_row(sheet) < arrayLength(&instances));
         if all(through <= vec3<f32>(0.0)) {
             rayQueryTerminate(&q);
             return vec3<f32>(0.0);
@@ -244,7 +250,7 @@ fn gi_mesh_trace(@builtin(global_invocation_id) id: vec3<u32>) {
     var cut_outs = 0u;
     while rayQueryProceed(&q) {
         let candidate = rayQueryGetCandidateIntersection(&q);
-        if !is_cut_out(candidate.instance_index) { continue; }
+        if !is_cut_out(ray_row(candidate)) { continue; }
         cut_outs++;
         if cut_outs > MAX_CUT_OUTS || cut_out_surface(candidate, ray.dir, RAY_SPREAD * max(candidate.t - behind, 0.0), seed) {
             rayQueryConfirmIntersection(&q);
@@ -259,12 +265,12 @@ fn gi_mesh_trace(@builtin(global_invocation_id) id: vec3<u32>) {
     var extra = vec3<f32>(0.0);
     // The terrain's share of the sun at the hit.
     var terrain_sun = 0.0;
-    if c.kind != RAY_QUERY_INTERSECTION_NONE && c.instance_index < arrayLength(&instances) {
+    if c.kind != RAY_QUERY_INTERSECTION_NONE && ray_row(c) < arrayLength(&instances) {
         // The triangle: its frame corners for the face's normal, its
         // vertex normals (object space, to the frame by the inverse
         // transpose) for the side the mesh calls outside. A proxy has no
         // vertex normals: its winding says outside (its object-space face).
-        let instance = instances[c.instance_index];
+        let instance = instances[ray_row(c)];
         let t = ray_triangle(instance, c.primitive_index);
         let o = t.corners;
         var local = ray_triangle_outside(t, vec3<f32>(1.0 - c.barycentrics.x - c.barycentrics.y, c.barycentrics));
