@@ -1,16 +1,22 @@
 //! GI as a feature: the nodes it adds to preset graphs.
 //!
-//! The probes' update runs before the G-buffer phase (it reads no G-buffer,
-//! and a terrain drawer traces its rays while it draws); the meshes' tracer
-//! joins at [`Slot::Geometry`]; the resolve at [`Slot::LightingInputs`],
-//! publishing the frame's indirect diffuse. The probes' hits are lit
-//! through the frame's sun transmittance when a medium published one.
+//! The probes' update runs at [`Slot::Geometry`], after the G-buffer phase:
+//! every kind has drawn this frame's geometry there (a voxel terrain its cut
+//! for this eye, uploads and all), so the tracers its rays meet answer for
+//! the frame being drawn, and the probes take this frame's rays before the
+//! resolve reads them. Its node holds the whole update: the probe stream's
+//! generator, the stream's tracers (`stream::trace`), the hits' light and
+//! the shadow stream's generator, its tracers, the integration. The resolve
+//! joins at [`Slot::LightingInputs`], publishing the frame's indirect
+//! diffuse. Where nothing traces rays (no kind registered a tracer this
+//! device runs), neither builds.
 
 use helio_feature_api::{Feature, FeatureRegistrar, NodeBuild, NodeDescriptor, ParamDesc};
 use helio_frame_api::lighting::{inputs_order, sun_transmittance, InputsOrder};
-use helio_frame_api::{FrameNode, Phase, Slot};
+use helio_frame_api::rays::stream;
+use helio_frame_api::{FrameNode, Slot};
 
-use crate::{GiMeshTracePass, GiPass, GiResolvePass, GiSettings};
+use crate::{GiIntegratePass, GiLightPass, GiPass, GiResolvePass, GiSettings};
 
 /// World-space diffuse GI ([`crate`]).
 pub struct GiFeature;
@@ -23,11 +29,6 @@ fn settings(build: &NodeBuild<'_, '_>) -> GiSettings {
         .setting::<GiSettings>()
         .copied()
         .unwrap_or_default()
-}
-
-/// Whether a feature traces the probes against its terrain this graph.
-fn terrain_traced(build: &NodeBuild<'_, '_>) -> bool {
-    build.env.setting::<helio_gi_api::TerrainTracer>().is_some()
 }
 
 fn node(
@@ -47,6 +48,34 @@ fn node(
     .with_generated_pins()
 }
 
+/// The probes' update (module docs): its passes and the tracers' between
+/// them.
+fn build_update(build: &mut NodeBuild<'_, '_>) -> Result<(), String> {
+    if stream::traced(build.env) == 0 {
+        log::warn!(
+            "GI is off: nothing in this graph traces rays (no kind registered a ray tracer this \
+             device runs; meshes need hardware ray queries, which the host opts into)"
+        );
+        return Ok(());
+    }
+    let config = settings(build).config();
+    let sun = sun_transmittance::current(build.env);
+    let device = build.env.device.clone();
+    let stats = build.env.stats.clone();
+    build
+        .graph
+        .add_pass(Box::new(GiPass::new(&device, config, &stats)));
+    stream::trace(build, &crate::probe_stream())?;
+    build
+        .graph
+        .add_pass(Box::new(GiLightPass::new(&device, sun, &stats)));
+    stream::trace(build, &crate::shadow_stream())?;
+    build
+        .graph
+        .add_pass(Box::new(GiIntegratePass::new(&device)));
+    Ok(())
+}
+
 impl Feature for GiFeature {
     fn id(&self) -> &'static str {
         "helio.gi"
@@ -54,55 +83,20 @@ impl Feature for GiFeature {
 
     fn register(&self, registrar: &mut FeatureRegistrar<'_>) {
         registrar.consumes(helio_light_api::DIRECTIONAL_LIGHTS_ROW);
-        registrar.consumes(helio_mesh_api::MESH_VERTICES);
-        registrar.consumes(helio_mesh_api::MESH_INDICES);
         registrar.consumes(helio_light_api::SCENE_LIGHTS);
-        registrar.consumes(helio_mats::MATERIALS);
         // What shader hot reload may swap without rebuilding the graph.
         registrar.swappable::<GiPass>();
-        registrar.swappable::<GiMeshTracePass>();
+        registrar.swappable::<GiLightPass>();
+        registrar.swappable::<GiIntegratePass>();
         registrar.swappable::<GiResolvePass>();
         registrar.node(
             node(
                 "gi",
                 "GI: Probe Update",
-                "Integrates last frame's hits into the probe clipmap and writes this frame's rays. \
-                 Builds nothing where nothing can trace them.",
-                |build| {
-                    let settings = settings(build);
-                    let traced = terrain_traced(build);
-                    if settings.active(build.env.device, traced) {
-                        let sun = sun_transmittance::current(build.env);
-                        let pass = GiPass::new(build.env.device, settings.config(traced))
-                            .with_sun_transmittance(sun);
-                        build.graph.add_pass(Box::new(pass));
-                    } else {
-                        log::warn!(
-                            "GI is off: nothing can trace the probes. A voxel terrain traces them; \
-                             meshes need hardware ray queries, which this device was created without \
-                             (the host's hardware ray query opt-in)"
-                        );
-                    }
-                    Ok(())
-                },
-            )
-            .once_per_frame()
-            .before_phase(Phase::GBuffer, 10),
-        );
-        registrar.node(
-            node(
-                "gi_mesh_trace",
-                "GI: Mesh Rays",
-                "Traces the probes' rays against the scene's TLAS (hardware ray queries).",
-                |build| {
-                    if let Some(pass) = GiMeshTracePass::new(build.env.device, build.env.queue) {
-                        let sun = sun_transmittance::current(build.env);
-                        build
-                            .graph
-                            .add_pass(Box::new(pass.with_sun_transmittance(sun)));
-                    }
-                    Ok(())
-                },
+                "Traces this frame's probe rays and their shadow rays through every kind's \
+                 tracer, lights the hits and integrates them into the probe clipmap. Builds \
+                 nothing where nothing traces rays.",
+                build_update,
             )
             .once_per_frame()
             .in_slot(Slot::Geometry, 20),
@@ -111,10 +105,10 @@ impl Feature for GiFeature {
             node(
                 "gi_resolve",
                 "GI: Resolve",
-                "The probes' irradiance at every pixel (the frame's indirect diffuse) for the lighting. Builds nothing where the lighting ran before it (forward).",
+                "The probes' irradiance at every pixel (the frame's indirect diffuse) for the lighting. Builds nothing where the lighting ran before it (forward) or nothing traces rays.",
                 |build| {
                     let read = inputs_order(build.env) == InputsOrder::BeforeLighting;
-                    if read && settings(build).active(build.env.device, terrain_traced(build)) {
+                    if read && stream::traced(build.env) > 0 {
                         build
                             .graph
                             .add_pass(Box::new(GiResolvePass::new(build.env.device)));

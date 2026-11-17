@@ -6,9 +6,9 @@ use pulsar_settings::project::rendering::SettingsGroupRegistration;
 
 // ── Rendering ───────────────────────────────────────────────────────────────
 
-/// GI's feature: the probe clipmap, its tracers (the meshes' ray queries; a
-/// voxel terrain through `helio-gi-api`'s `TerrainTracer`) and the resolve
-/// that publishes the frame's indirect diffuse.
+/// GI's feature: the probe clipmap (its rays traced through the frame's ray
+/// streams by every kind's tracer) and the resolve that publishes the
+/// frame's indirect diffuse.
 fn render_features() -> helio_feature_api::FeatureSet {
     helio_feature_api::FeatureSet::new().with(helio_pass_gi::GiFeature)
 }

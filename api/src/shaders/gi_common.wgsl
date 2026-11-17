@@ -1,13 +1,13 @@
-// World-space irradiance probes (README.md): the clipmap, a probe's record,
-// rays and hits. Shared by the update, the resolve and the tracers, which
-// bind `frame_gi` (a `GiFrame`).
+// World-space irradiance probes (README.md): the clipmap, a probe's record
+// and its rays' directions. Shared by GI's passes and any reader of the
+// probes, which bind `frame_gi` (a `GiFrame`).
 
 const GI_LEVELS: u32 = 6u;
 const GI_SIDE: u32 = 24u;
 const GI_LEVEL_PROBES: u32 = 13824u; // GI_SIDE^3
 const GI_PROBES: u32 = 82944u;
 const GI_RAYS: u32 = 64u;
-// Probes updated a frame at most (`gi_lists`' two update lists).
+// Probes updated a frame at most (`gi_lists`' update list).
 const GI_MAX_UPDATES: u32 = 2720u;
 // A probe's record in `gi_probes` (words): irradiance / pi as L1 spherical
 // harmonics (RGB, half floats in 6 words), its state, then its distance
@@ -34,14 +34,17 @@ struct GiFrame {
     // below it (rgb).
     sky: vec4<f32>,
     ground: vec4<f32>,
-    // Probes updated this frame, last frame, probes reset this frame, and
-    // which of `gi_lists`' update lists is this frame's.
+    // Probes updated this frame, 0, probes reset this frame, 0.
     counts: vec4<u32>,
-    // This frame's ray rotation (a unit quaternion), and last frame's.
+    // This frame's ray rotation (a unit quaternion); `prev_rotation` unused
+    // (`helio_gi_api`'s crate docs).
     rotation: vec4<f32>,
     prev_rotation: vec4<f32>,
 }
 
+// The voxel plugin's old probe tracer's rows (`helio_gi_api`'s crate docs):
+// nothing of GI's reads them, and they go with that tracer.
+//
 // A ray (`gi_rays`): origin (eye-relative), the most distance; direction,
 // then its probe's storage index.
 struct GiRay {

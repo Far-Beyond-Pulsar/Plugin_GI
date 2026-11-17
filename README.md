@@ -1,6 +1,6 @@
 # Plugin_GI
 
-World-space diffuse GI: the probe clipmap the scene's tracers feed, and its settings.
+World-space diffuse GI: the probe clipmap, traced through the frame's ray streams, and its settings.
 
 `pulsar.gi` ("Global Illumination") is a plugin of
 [Pulsar-Native](https://github.com/Far-Beyond-Pulsar/Pulsar-Native), the engine and editor that renders with
@@ -19,10 +19,10 @@ draw phases and api crates.
 
 | Crate | Path | What |
 |---|---|---|
-| `helio-gi-api` | `api/` | The GI plugin's public contract: the probe clipmap's layout, the rays, hits and irradiance it publishes, and the WGSL that reads them (a terrain that traces the probes reads it). |
+| `helio-gi-api` | `api/` | The GI plugin's public contract: the probe clipmap's layout, the probes and irradiance it publishes, and the WGSL that reads them. |
 | `gi_plugin` | `./` (`src/`) | The plugin's root crate: the one place it registers everything it contributes (`src/runtime.rs`: the feature set, its configuration from the project's GI settings, and the settings group). GI has no SceneDB component and no editor UI, so it has no component or editor crate. |
 | `gi-examples` | `examples/` | The GI plugin's standalone hosts on Helio: the indoor cathedral lit by the probes |
-| `helio-pass-gi` | `feature/` | Helio world-space diffuse global illumination: a probe clipmap traced by the scene's tracers |
+| `helio-pass-gi` | `feature/` | Helio world-space diffuse global illumination: a probe clipmap traced through the frame's ray streams |
 
 - **Root crate** `gi_plugin`: the only crate that registers anything (the
   Helio feature and its settings group; GI registers nothing for the
@@ -31,7 +31,7 @@ draw phases and api crates.
 - **Requires**: nothing. A project enables or disables the plugin in its
   `Pulsar.toml` (`[plugins]`); disabled, the kind is absent and the frame
   draws without it.
-- **Reads other kinds through**: `helio-light-api` (lights); `helio-mats` (materials); `helio-mesh-api` (meshes).
+- **Reads other kinds through**: `helio-light-api` (lights: the sun, and the point and spot lights its hits sample). Geometry of every kind reaches it only through Helio's ray streams (`helio_frame_api::rays::stream`): each kind's tracer answers GI's rays, and GI names none.
 - **Its standalone hosts also compose**: `helio-light-api, helio-light-host` (lights); `helio-mats` (materials); `helio-mesh-api, helio-mesh-host, helio-pass-forward-lit, helio-vg-stream` (meshes); `helio-pass-sky` (sky) (demos and GPU tests
   draw a whole scene; the plugin itself does not depend on these).
 

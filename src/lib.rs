@@ -1,10 +1,11 @@
 //! Global Illumination (`pulsar.gi`): the plugin's root crate, the one place
 //! the plugin registers everything it contributes.
 //!
-//! The plugin's other crates hold the code: `helio-gi-api` (the tracer
-//! interface other kinds implement), the feature crate (`helio-pass-gi`: the
-//! probe clipmap, its tracers and the resolve that publishes the frame's
-//! indirect diffuse). GI has no SceneDB component (its probe clipmap follows
+//! The plugin's other crates hold the code: `helio-gi-api` (the probes'
+//! layout and the WGSL that reads them), the feature crate (`helio-pass-gi`:
+//! the probe clipmap, traced through the frame's ray streams by whatever
+//! kinds the frame has, and the resolve that publishes the frame's indirect
+//! diffuse). GI has no SceneDB component (its probe clipmap follows
 //! the camera; the scene's tracers feed it) and no editor UI of its own.
 //! Neither crate registers a contribution; this crate imports them and
 //! registers them
