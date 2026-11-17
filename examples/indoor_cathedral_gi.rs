@@ -29,8 +29,7 @@ use common::{
     spawn_object, update_light, SceneRays, SurfaceCapture,
 };
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    HelioAction, HelioCommandBridge, HelioGraphicsConfig, HelioGraphicsContext, Renderer,
+    Camera, HelioAction, HelioCommandBridge, HelioGraphicsConfig, HelioGraphicsContext, Renderer,
     RendererBuilder, RendererConfig,
 };
 use helio_bake::BakeConfig;
@@ -200,7 +199,6 @@ impl ApplicationHandler for App {
         .expect("Helio graphics context");
         let device = graphics.device.clone();
         let queue = graphics.queue.clone();
-        let adapter = graphics.adapter.clone();
         let format = graphics.surface_config.format;
         device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
             panic!("[GPU UNCAPTURED ERROR] {:?}", e);
