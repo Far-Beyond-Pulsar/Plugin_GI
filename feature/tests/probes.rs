@@ -143,6 +143,29 @@ fn the_sky_lights_probes_from_above() {
     );
 }
 
+/// With an atmosphere, a probe ray that meets nothing takes the
+/// atmosphere's sky (here black) wherever the sky publishes it, not the
+/// flat ambient (radiance 1 here): every probe over black ground stays dark.
+#[test]
+fn a_miss_takes_the_atmosphere_s_sky() {
+    let setup = Setup {
+        sky: 1.0,
+        black_atmosphere: true,
+        ..Default::default()
+    };
+    let Some(mut h) = harness(setup, vec![Shape::ground(0.0, 0.0)]) else {
+        return;
+    };
+    h.frames(4);
+    let words = h.probes();
+    let above = updated(&words, &h.clipmap(), |at| at.y >= 0.5);
+    for &(index, at) in &above {
+        let up = probe(&words, index, Vec3::Y).0;
+        assert!(up.max_element() < 0.01, "probe at {at}: up {up}");
+    }
+    assert!(above.len() > 1000, "{} above", above.len());
+}
+
 /// No sky; the sun (illuminance 2) straight down on flat ground of base
 /// colour 128/255: a probe over it sees the ground's radiance a 2 / pi below
 /// (its shadow ray to the sun clear) and nothing above.
@@ -188,10 +211,12 @@ fn down_at(h: &mut Harness, at: DVec3, frames: usize) -> Vec3 {
     e
 }
 
-/// The sun straight down on lit ground, and a roof (12 m square, 3 m up)
-/// over a probe a metre up: the ground under the roof is in its shadow, so
-/// the probe sees the lit ground only past it (a few percent of its view
-/// down), where a probe in the open sees it all.
+/// The sun straight down on lit ground, and a black roof (12 m square, 3 m
+/// up) over a probe a metre up: the ground under the roof is in its shadow,
+/// so the probe sees the lit ground only past it (a few percent of its view
+/// down, plus that light bounced in under the roof), where a probe in the
+/// open sees it all. The roof reflects nothing, so what the probe sees is
+/// the shadow, not light bounced between the roof and the ground.
 #[test]
 fn a_roof_shadows_the_sun() {
     let setup = Setup {
@@ -202,7 +227,7 @@ fn a_roof_shadows_the_sun() {
     let roof = Shape::solid(
         DVec3::new(eye.x - 6.0, 3.0, eye.z - 6.0),
         DVec3::new(eye.x + 6.0, 3.5, eye.z + 6.0),
-        HALF,
+        0.0,
     );
     let probe_at = DVec3::new(eye.x, 1.0, eye.z);
     let Some(mut open) = harness(setup.clone(), vec![Shape::ground(0.0, HALF)]) else {

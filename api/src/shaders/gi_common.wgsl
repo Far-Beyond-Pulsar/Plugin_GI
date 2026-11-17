@@ -34,48 +34,11 @@ struct GiFrame {
     // below it (rgb).
     sky: vec4<f32>,
     ground: vec4<f32>,
-    // Probes updated this frame, 0, probes reset this frame, 0.
-    counts: vec4<u32>,
-    // This frame's ray rotation (a unit quaternion); `prev_rotation` unused
-    // (`helio_gi_api`'s crate docs).
+    // This frame's ray rotation (a unit quaternion).
     rotation: vec4<f32>,
-    prev_rotation: vec4<f32>,
-}
-
-// The voxel plugin's old probe tracer's rows (`helio_gi_api`'s crate docs):
-// nothing of GI's reads them, and they go with that tracer.
-//
-// A ray (`gi_rays`): origin (eye-relative), the most distance; direction,
-// then its probe's storage index.
-struct GiRay {
-    origin: vec4<f32>,
-    dir: vec3<f32>,
-    probe: u32,
-}
-
-// A tracer's hit (`gi_hits`, one a ray): its distance (0: none), its normal
-// (packed, `gi_pack_unit`), albedo (RGB8) and the sun's visibility from it
-// (a byte in the albedo word's alpha); and in `light`, bytes: the tracer
-// (bits 0..8), the share of light the surface lets through from its far
-// side, tinted by its albedo (bits 8..16: foliage), the sun's visibility
-// from that far side (bits 16..24), and the light it gives off, its albedo
-// times this (bits 24..32: sixteenths).
-struct GiHit {
-    t: f32,
-    normal: u32,
-    albedo: u32,
-    light: u32,
-}
-
-fn gi_pack_unit(n: vec3<f32>) -> u32 {
-    let e = clamp(n * 0.5 + 0.5, vec3<f32>(0.0), vec3<f32>(1.0));
-    return u32(e.x * 1023.0 + 0.5) | (u32(e.y * 1023.0 + 0.5) << 10u) | (u32(e.z * 1023.0 + 0.5) << 20u);
-}
-
-fn gi_unpack_unit(p: u32) -> vec3<f32> {
-    let e = vec3<f32>(f32(p & 1023u), f32((p >> 10u) & 1023u), f32((p >> 20u) & 1023u)) / 1023.0;
-    let n = e * 2.0 - 1.0;
-    return n / max(length(n), 1e-6);
+    // Probes updated this frame, probes reset this frame.
+    updated: u32,
+    reset: u32,
 }
 
 // Probe `index`'s level, and its logical coordinates in its grid.

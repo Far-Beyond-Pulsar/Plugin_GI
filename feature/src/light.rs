@@ -214,8 +214,9 @@ impl RenderPass for GiLightPass {
         else {
             return Ok(());
         };
-        let atmosphere = binding(SKY_FRAME).unwrap_or(&self.no_atmosphere);
-        let sky_table = binding(SKY_TABLE).unwrap_or(&self.no_sky_table);
+        let [atmosphere, sky_table] = crate::sky(ctx.registry);
+        let atmosphere = atmosphere.unwrap_or(&self.no_atmosphere);
+        let sky_table = sky_table.unwrap_or(&self.no_sky_table);
         let (cloud_map, cloud_frame) = self
             .sun_transmittance
             .and_then(|published| {

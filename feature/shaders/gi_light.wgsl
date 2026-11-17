@@ -67,7 +67,7 @@ var<workgroup> w_suns: u32;
 
 @compute @workgroup_size(64)
 fn gi_light(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
-    if wg.x >= frame_gi.counts.x { return; }
+    if wg.x >= frame_gi.updated { return; }
     if li == 0u {
         atomicStore(&w_sun, 0u);
         atomicStore(&w_local, 0u);

@@ -230,6 +230,13 @@ fn compute(
     )
 }
 
+/// The atmosphere's frame and sky table, as the sky publishes them (registry
+/// values under `SKY_FRAME` and `SKY_TABLE`), if any: the one lookup GI's
+/// passes share (the sun, the sky a probe ray meets).
+fn sky<'a>(registry: &helio_core::ResourceRegistry<'a>) -> [Option<&'a wgpu::Buffer>; 2] {
+    [SKY_FRAME, SKY_TABLE].map(|name| registry.get::<&'a wgpu::Buffer>(ResourceKey::new(name)))
+}
+
 fn pipeline_layout(
     device: &wgpu::Device,
     label: &str,
@@ -423,9 +430,10 @@ impl GiPass {
             levels: clipmap.levels(eye),
             sky: sky.extend(0.0).to_array(),
             ground: ground.extend(0.0).to_array(),
-            counts: [updated, 0, self.entered.len() as u32, 0],
             rotation: rotation(frame),
-            prev_rotation: [0.0, 0.0, 0.0, 1.0],
+            updated,
+            reset: self.entered.len() as u32,
+            _pad: [0; 2],
         };
         let trace = GpuTrace {
             eye: frame_eye.extend(0.0).to_array(),
@@ -563,14 +571,7 @@ impl RenderPass for GiPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let atmosphere = ctx
-            .registry
-            .get::<&wgpu::Buffer>(ResourceKey::new(SKY_FRAME))
-            .cloned();
-        let sky_table = ctx
-            .registry
-            .get::<&wgpu::Buffer>(ResourceKey::new(SKY_TABLE))
-            .cloned();
+        let [atmosphere, sky_table] = sky(ctx.registry).map(|b| b.cloned());
         let directional = ctx
             .scene_buffers
             .get(helio_light_api::DIRECTIONAL_LIGHTS_ROW.key())

@@ -49,7 +49,7 @@ fn gi_sun_main() {
 // (before this frame's integration, which may update them at once).
 @compute @workgroup_size(64)
 fn gi_reset(@builtin(global_invocation_id) id: vec3<u32>) {
-    if id.x >= frame_gi.counts.z { return; }
+    if id.x >= frame_gi.reset { return; }
     let at = gi_lists[GI_MAX_UPDATES + id.x] * GI_PROBE_WORDS;
     for (var w = 0u; w < GI_PROBE_WORDS; w++) { gi_probes[at + w] = 0u; }
     gi_probes[at + GI_STATE_WORD] = GI_ACTIVE;
@@ -61,7 +61,7 @@ fn gi_reset(@builtin(global_invocation_id) id: vec3<u32>) {
 // put the probe (`gi_light` counts it as inside).
 @compute @workgroup_size(64)
 fn gi_rays_main(@builtin(global_invocation_id) id: vec3<u32>) {
-    if id.x >= frame_gi.counts.x * GI_RAYS { return; }
+    if id.x >= frame_gi.updated * GI_RAYS { return; }
     let index = gi_lists[id.x / GI_RAYS];
     let probe = gi_probe_position(index) + gi_trace.eye.xyz;
     let dir = gi_ray_dir(id.x % GI_RAYS, frame_gi.rotation);

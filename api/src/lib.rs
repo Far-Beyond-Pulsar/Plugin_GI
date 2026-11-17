@@ -8,21 +8,11 @@
 //!
 //! GI traces its rays through the frame's ray streams
 //! (`helio_frame_api::rays::stream`): no kind traces for GI by name, so this
-//! crate holds no tracer interface. What is left of the old one
-//! ([`TerrainTracer`], [`GI_RAYS`], [`GI_HITS`], [`GI_CLIPMAP`], `GiRay` and
-//! `GiHit` in `gi_common.wgsl`, [`GpuFrame`]'s `prev_rotation`) is there only
-//! while the voxel plugin's old probe tracer still compiles against it; GI
-//! itself reads and publishes none of it, and it goes with that tracer.
+//! crate holds no tracer interface.
 
 use bytemuck::{Pod, Zeroable};
 use glam::{DVec3, I64Vec3, Vec3};
 use helio_core::PrepareContext;
-
-/// The voxel plugin's old marker that it traced the probes. GI no longer
-/// reads it (whether anything traces is `stream::traced`, the spacing is
-/// `GiSettings::probe_spacing`); deleted with the voxel's old tracer.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct TerrainTracer;
 
 /// Levels of the clipmap, each twice as far apart as the one inside it.
 pub const LEVELS: usize = 6;
@@ -65,13 +55,6 @@ pub const GI_IRRADIANCE: &str = helio_frame_api::lighting::INDIRECT_DIFFUSE;
 /// Debug mode of the probes' view (`GiResolvePass`; deferred lighting shows
 /// it as it shows `gi_irradiance`).
 pub const GI_PROBES_VIEW: u32 = 36;
-
-/// The voxel plugin's old probe tracer's keys (crate docs): GI publishes
-/// none of them.
-pub const GI_RAYS: &str = "gi_rays";
-pub const GI_HITS: &str = "gi_hits";
-/// The frame's [`Clipmap`] (a registry value), as that tracer read it.
-pub const GI_CLIPMAP: &str = "gi_clipmap";
 
 /// The probes' shared WGSL (`gi_common.wgsl`: the clipmap, a probe's record,
 /// its rays' directions): a reader opts in with `//!use gi_common`.
@@ -198,18 +181,20 @@ pub struct GpuLevel {
     pub base: [u32; 4],
 }
 
-/// `GiFrame` (`gi_common.wgsl`). `counts`: probes updated this frame, 0,
-/// probes reset this frame, 0. `prev_rotation` is unused (crate docs).
+/// `GiFrame` (`gi_common.wgsl`).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct GpuFrame {
     pub levels: [GpuLevel; LEVELS],
     pub sky: [f32; 4],
     pub ground: [f32; 4],
-    pub counts: [u32; 4],
+    /// This frame's ray rotation (a unit quaternion).
     pub rotation: [f32; 4],
-    pub prev_rotation: [f32; 4],
+    /// Probes updated this frame, probes reset this frame.
+    pub updated: u32,
+    pub reset: u32,
+    pub _pad: [u32; 2],
 }
 
 pub const FRAME_BYTES: u64 = std::mem::size_of::<GpuFrame>() as u64;
-const _: () = assert!(FRAME_BYTES == 272);
+const _: () = assert!(FRAME_BYTES == 256);

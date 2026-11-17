@@ -29,7 +29,7 @@ var<workgroup> w_answered: u32;
 
 @compute @workgroup_size(64)
 fn gi_integrate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
-    if wg.x >= frame_gi.counts.x { return; }
+    if wg.x >= frame_gi.updated { return; }
     if li == 0u {
         w_answered = gi_answered[0];
         atomicStore(&w_inside, 0u);

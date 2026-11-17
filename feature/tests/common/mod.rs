@@ -445,6 +445,9 @@ pub struct Setup {
     pub lights: Vec<helio_light_api::GpuLight>,
     /// Whether the analytic tracer is offered at all.
     pub traced: bool,
+    /// An atmosphere whose sky is black (its frame and sky table published
+    /// as the sky publishes them), over the flat sky.
+    pub black_atmosphere: bool,
 }
 
 impl Default for Setup {
@@ -456,6 +459,7 @@ impl Default for Setup {
             sun: None,
             lights: Vec::new(),
             traced: true,
+            black_atmosphere: false,
         }
     }
 }
@@ -514,6 +518,8 @@ pub struct Harness {
     target: wgpu::TextureView,
     depth: wgpu::TextureView,
     captured: Arc<Mutex<Option<[wgpu::Buffer; 2]>>>,
+    /// The atmosphere's frame and sky table, when the setup has one.
+    atmosphere: Option<[wgpu::Buffer; 2]>,
 }
 
 fn storage_init(gpu: &Gpu, label: &str, bytes: &[u8]) -> wgpu::Buffer {
@@ -672,8 +678,26 @@ impl Harness {
                 })
                 .create_view(&Default::default())
         };
+        use helio_frame_api::lighting::sky::{SKY_FRAME_BYTES, SKY_TABLE_BYTES};
+        let atmosphere = setup.black_atmosphere.then(|| {
+            let uniform = |bytes: &[u8]| {
+                use wgpu::util::DeviceExt;
+                gpu.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("test atmosphere"),
+                        contents: bytes,
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    })
+            };
+            // `SkyFrame.planet.w` 1: an atmosphere is active; nothing else.
+            let mut frame = vec![0f32; (SKY_FRAME_BYTES / 4) as usize];
+            frame[3] = 1.0;
+            let table = vec![0u8; SKY_TABLE_BYTES as usize];
+            [uniform(bytemuck::cast_slice(&frame)), uniform(&table)]
+        });
         Self {
             gpu,
+            atmosphere,
             scene: Scene {
                 gpu,
                 frame: 0,
@@ -706,6 +730,19 @@ impl Harness {
             },
             "test",
         );
+        if let Some([frame, table]) = &self.atmosphere {
+            use helio_frame_api::lighting::sky::{SKY_FRAME, SKY_TABLE};
+            registry.write(
+                helio_core::ResourceKey::<&wgpu::Buffer>::new(SKY_FRAME),
+                frame,
+                "test",
+            );
+            registry.write(
+                helio_core::ResourceKey::<&wgpu::Buffer>::new(SKY_TABLE),
+                table,
+                "test",
+            );
+        }
         self.graph
             .execute_with_registry(&self.scene, &self.target, &self.depth, &mut registry)
             .expect("the frame renders");
