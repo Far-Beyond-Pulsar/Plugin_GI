@@ -30,10 +30,11 @@ pub const LEVELS: usize = 6;
 pub const SIDE: i64 = 24;
 pub const LEVEL_PROBES: u32 = (SIDE * SIDE * SIDE) as u32;
 pub const PROBES: u32 = LEVEL_PROBES * LEVELS as u32;
-/// The finest level's probe spacing by default (metres): a clipmap reaching
-/// 384 m around the eye. Scenes of rooms set a finer one
-/// (`GiSettings::probe_spacing`).
-pub const DEFAULT_FINEST_SPACING: f64 = 1.0;
+/// The finest level's probe spacing by default (metres): rooms, pillars and
+/// furniture a few metres apart, a clipmap reaching 192 m around the eye.
+/// Hosts over open ground set a coarser one (1 m: 384 m) through
+/// `GiSettings::probe_spacing`.
+pub const DEFAULT_FINEST_SPACING: f64 = 0.5;
 /// Rays a probe update traces.
 pub const RAYS: u32 = 64;
 /// Probes updated a frame, by level: the two finest every 20 frames or so,

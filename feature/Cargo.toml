@@ -18,6 +18,20 @@ glam = { workspace = true }
 log = { workspace = true }
 
 [dev-dependencies]
-# The tests trace GI's streams with an analytic tracer of their own: no
-# kind's crate.
 pollster = "=0.4.0"
+# The probe tests trace GI's streams with an analytic tracer of their own
+# (no kind). The graph tests: mesh and virtual-geometry scenes over Helio's
+# presets plus this feature, traced by the meshes' tracer
+# (`helio-pass-mesh-rays`, in the meshes' features), their rows as the
+# plugins' host components.
+helio = { workspace = true }
+helio-presets = { workspace = true }
+helio-mats = { workspace = true, features = ["host-rows"] }
+helio-light-host = { workspace = true }
+helio-mesh-api = { workspace = true }
+helio-mesh-host = { workspace = true }
+helio-pass-mesh-rays = { workspace = true }
+helio-vg-build = { workspace = true }
+helio-vg-format = { workspace = true }
+helio-vg-stream = { workspace = true }
+pulsar_scenedb = { workspace = true }

@@ -3,9 +3,10 @@
 // frame's place of the eye, how far rays start off what they leave, and
 // what the lighting of a probe ray's hit leaves for its integration.
 
-// A probe ray's cone: the width of its footprint a metre out, the side of
-// the square of one of its probe's GI_RAYS rays' solid angle
-// (sqrt(4 pi / 64)). Shadow rays from its hit keep it.
+// A probe ray's cone: no width at the probe, and the width of its footprint
+// a metre out the side of the square of one of its probe's GI_RAYS rays'
+// solid angle (sqrt(4 pi / 64)). A shadow ray from its hit starts as wide as
+// its footprint there and keeps that width.
 const GI_RAY_SPREAD: f32 = 0.443;
 // The most distance a probe ray or a shadow ray toward the sun travels:
 // past the far side of an Earth-sized planet.

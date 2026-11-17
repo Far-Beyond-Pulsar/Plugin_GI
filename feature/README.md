@@ -11,10 +11,11 @@ or under overhangs, and light that changes as the world is dug and built.
 - **Clipmap.** `LEVELS` (6) cubic grids of `SIDE`^3 (24^3) probes, each
   twice as far apart as the one inside it. The finest spacing is the
   pass's (`GiConfig::finest_spacing`, the `gi` settings group's
-  `probe_spacing`): 1 m by default (1, 2, 4 .. 32 m apart: half-extents of
-  12 to 384 m around the eye); a scene of rooms, pillars and furniture a
-  few metres apart sets 0.5 m (6 to 192 m), as the cathedral example does.
-  What kinds the scene holds does not choose it: a host or project sets it. Probes sit at whole
+  `probe_spacing`): 0.5 m by default, for rooms, pillars and furniture a
+  few metres apart (0.5, 1, 2 .. 16 m apart: half-extents of 6 to 192 m
+  around the eye); a host over open ground sets 1 m (12 to 384 m), as the
+  voxel examples do. What kinds the scene holds does not choose it: a host
+  or project sets it. Probes sit at whole
   multiples of their spacing in world coordinates, and are stored
   toroidally: storage coordinates are world coordinates modulo `SIDE`. A
   probe keeps its record while it stays in the clipmap, and a grid that
@@ -63,8 +64,12 @@ whole update:
    - `gi_rays_main`: this frame's rays into the probe stream (`gi_probe`,
      `RayClass::Nearest`, `MAX_RAYS` rows: 64 a probe, in update order), in
      the frame's space (the probes are eye-relative; the eye's frame
-     position is added), each with the cone of one of its probe's 64 rays
-     (`GI_RAY_SPREAD`, sqrt(4 pi / 64)), its hit cleared. The header's count
+     position is added), each with no width at the probe and the spread of
+     one of its probe's 64 rays (`GI_RAY_SPREAD`, sqrt(4 pi / 64)), its hit
+     cleared. A tracer traces from a ray's origin itself, so the rays start
+     a few millimetres behind their probe (`gi_ray_offset`) and `gi_light`
+     takes a hit nearer the probe than that as an inside (a probe on a
+     floor is dropped whichever side rounding put it). The header's count
      is the CPU's (updated probes times 64).
 2. **The tracers** (`stream::trace`): each ray's nearest hit (`SceneHit`:
    distance, tracer, inside) and its `SceneSurface` (shading and face
@@ -93,7 +98,9 @@ whole update:
    it, ground under a cloud was lit by bounce from ground the cloud shades.
    What waits on a shadow ray, and the rest, go into `gi_pending` (RGB9E5,
    24 bytes a ray). The shadow rays start off the surface along its face
-   normal by `0.002 + 4e-6 * |p|` (a few ulps of f32 at the point). They are
+   normal by `0.002 + 4e-6 * |p|` (a few ulps of f32 at the point), as wide
+   as the probe ray's footprint at the hit (`GI_RAY_SPREAD * t`), keeping
+   that width (no spread), as cut-outs on the way are tested at it. They are
    packed into the shadow stream (`gi_shadow`, `RayClass::Occlusion`, up to
    two a probe ray) from row 0, a workgroup's together (its sun rays, then
    its local lights'), counted by a workgroup atomic and one global atomic
@@ -136,8 +143,12 @@ met anything, and `gi_integrate` writes nothing otherwise. Taking the sky
 there would seed a room's probes with it (alpha 1 for a probe's first
 update, then a slow blend), so the room would glow for seconds; holding
 leaves them as they were (not yet updated: the resolve's weight 0, the
-sky's ambient) until geometry answers. The cost: a scene emptied of all
-geometry keeps what its probes held.
+sky's ambient) until geometry answers.
+
+**Known limit.** A scene emptied of all geometry keeps what its probes held
+(every ray misses, so they hold). Telling a scene loading from one that is
+empty needs a tracer to say it has work pending: a streaming-readiness
+contract, not a ray-stream field, and out of r1's scope.
 
 `GiPass` publishes `gi_frame`, `gi_probes`, `gi_sun` and the probe stream;
 `GiLightPass` the shadow stream; the integration writes `gi_probes`. The

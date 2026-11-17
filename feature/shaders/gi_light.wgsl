@@ -80,7 +80,10 @@ fn gi_light(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     let eye = gi_trace.eye.xyz;
     let behind = gi_ray_offset(probe + eye);
     let hit = probe_hits[i];
-    let cone = scene_ray_cone(GI_RAY_SPREAD, RAY_MASK_ALL);
+    // Shadow rays start as wide as the probe ray's footprint at its hit and
+    // keep that width (no spread: a shadow ray stands for the probe ray's
+    // patch of surface, not a cone from a point).
+    var cone = scene_ray_cone(0.0, 0.0, RAY_MASK_ALL);
     var pending = GiPending(0u, 0u, 0u, 0.0, GI_NO_ROW, GI_NO_ROW);
     var rest = vec3<f32>(0.0);
     var sun_ray = SceneRay(vec3<f32>(0.0), 0.0, vec3<f32>(0.0, 1.0, 0.0), cone);
@@ -106,6 +109,7 @@ fn gi_light(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
             let at = probe + dir * t;
             let p = at + eye;
             let off = gi_ray_offset(p);
+            cone = scene_ray_cone(GI_RAY_SPREAD * t, 0.0, RAY_MASK_ALL);
             // Lambertian on the side the ray meets, plus the surface's
             // share of its far side's light.
             rest = base * gi_irradiance(at, n).rgb + scene_unpack_radiance(s.emissive);

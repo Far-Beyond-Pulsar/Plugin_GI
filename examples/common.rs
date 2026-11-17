@@ -53,20 +53,14 @@ pub fn new_scene_db_with_gpu_mirror_and(
         max_cells_metadata: 0,
     };
     let mut gpu_store = pulsar_scenedb::gpu::SceneGpuStore::new(&ctx, gpu_cfg);
-    AtmosphereComponent::register_gpu_columns_growable(&mut gpu_store, 4, device);
-    helio_mesh_host::MeshComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
+    AtmosphereComponent::register_gpu_columns_growable(&gpu_store, 4, device);
+    helio_mesh_host::MeshComponent::register_gpu_columns_growable(&gpu_store, 4096, device);
     helio_mats::host_rows::MaterialComponent::register_gpu_columns_growable(
-        &mut gpu_store,
-        4096,
-        device,
+        &gpu_store, 4096, device,
     );
-    helio_mesh_host::StaticObjectComponent::register_gpu_columns_growable(
-        &mut gpu_store,
-        4096,
-        device,
-    );
+    helio_mesh_host::StaticObjectComponent::register_gpu_columns_growable(&gpu_store, 4096, device);
     helio_light_host::LightComponent::register_gpu_columns_growable(
-        &mut gpu_store,
+        &gpu_store,
         helio_light_api::MAX_LIGHTS,
         device,
     );
@@ -163,13 +157,20 @@ impl SceneRays {
     }
 }
 
+/// Each pass's GPU times, and the last GPU frame read.
+type PassTimes = (Vec<(&'static str, Vec<f32>)>, Option<u64>);
+
 /// `HELIO_CAPTURE=<png>`: a windowed example saves its frame number
 /// `HELIO_CAPTURE_FRAME` (default 240: probes, shadows and temporal
-/// effects settled) and exits. The surface needs [`Self::usage`].
+/// effects settled) and exits. The surface needs [`Self::usage`]. With
+/// `HELIO_CAPTURE_TIMINGS` set it also prints each pass's median GPU time
+/// over the frames from 60 to the capture (the renderer's timing snapshot,
+/// [`Self::timings`]): frames run as the host runs them, pipelined.
 pub struct SurfaceCapture {
     path: Option<String>,
     at: u32,
     frame: u32,
+    timings: Option<PassTimes>,
 }
 
 impl SurfaceCapture {
@@ -182,6 +183,38 @@ impl SurfaceCapture {
             path: std::env::var("HELIO_CAPTURE").ok(),
             at,
             frame: 0,
+            timings: std::env::var_os("HELIO_CAPTURE_TIMINGS").map(|_| (Vec::new(), None)),
+        }
+    }
+
+    /// Takes this frame's pass timings (`Renderer::timing_snapshot`), once
+    /// per GPU frame that came back.
+    pub fn timings(&mut self, snapshot: &helio::RenderTimingSnapshot) {
+        let frame = self.frame;
+        let Some((passes, last)) = &mut self.timings else {
+            return;
+        };
+        if frame < 60 || snapshot.gpu_frame_index.is_none() || snapshot.gpu_frame_index == *last {
+            return;
+        }
+        *last = snapshot.gpu_frame_index;
+        for pass in &snapshot.passes {
+            let Some(ms) = pass.gpu_ms else { continue };
+            match passes.iter_mut().find(|(name, _)| *name == pass.name) {
+                Some((_, times)) => times.push(ms),
+                None => passes.push((pass.name, vec![ms])),
+            }
+        }
+    }
+
+    fn print_timings(&mut self) {
+        let Some((passes, _)) = &mut self.timings else {
+            return;
+        };
+        for (name, times) in passes.iter_mut() {
+            times.sort_by(f32::total_cmp);
+            let median = times[times.len() / 2];
+            println!("[timings] {name} {median:.4} ms ({} frames)", times.len());
         }
     }
 
@@ -213,6 +246,7 @@ impl SurfaceCapture {
             _ => return Ok(()),
         };
         let result = renderer.render(camera, &output.texture.create_view(&Default::default()));
+        self.timings(renderer.timing_snapshot());
         let (device, queue) = (renderer.device().clone(), renderer.queue().clone());
         if self.frame(&device, &queue, &output.texture) {
             std::process::exit(0);
@@ -270,7 +304,10 @@ impl SurfaceCapture {
         let mapped = readback.slice(..).get_mapped_range().unwrap();
         let mut pixels = Vec::with_capacity((width * height * 4) as usize);
         for y in 0..height {
-            for p in mapped[(y * row) as usize..][..(width * 4) as usize].chunks_exact(4) {
+            for p in mapped[(y * row) as usize..][..(width * 4) as usize]
+                .as_chunks::<4>()
+                .0
+            {
                 pixels.extend_from_slice(&if bgra {
                     [p[2], p[1], p[0], 255]
                 } else {
@@ -280,6 +317,7 @@ impl SurfaceCapture {
         }
         image::save_buffer(path, &pixels, width, height, image::ColorType::Rgba8).unwrap();
         println!("[capture] frame {} -> {path}", self.frame);
+        self.print_timings();
         true
     }
 }

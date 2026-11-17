@@ -12,9 +12,9 @@ use crate::GiConfig;
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct GiSettings {
     /// The finest probes' spacing (metres), or `None` for the default
-    /// ([`crate::DEFAULT_FINEST_SPACING`], a clipmap reaching 384 m around
-    /// the eye). A scene of rooms, pillars and furniture a few metres apart
-    /// sets a finer one (half a metre: 192 m).
+    /// ([`crate::DEFAULT_FINEST_SPACING`], half a metre: rooms, pillars and
+    /// furniture, a clipmap reaching 192 m around the eye). A host over open
+    /// ground sets a coarser one (1 m: 384 m).
     pub probe_spacing: Option<f32>,
 }
 
@@ -42,8 +42,8 @@ pub static GI: Group = Group {
         "Global Illumination",
         (0.0, 8.0, 0.25),
         0.0,
-        "Metres between the finest GI probes (each coarser level doubles it); 0: the default, 1 m \
-         (rooms and furniture want 0.5 m)",
+        "Metres between the finest GI probes (each coarser level doubles it); 0: the default, 0.5 m \
+         (open ground wants 1 m)",
     )],
 };
 
@@ -75,10 +75,10 @@ mod tests {
             GiSettings::default().config().finest_spacing,
             crate::DEFAULT_FINEST_SPACING
         );
-        let rooms = GiSettings {
-            probe_spacing: Some(0.5),
+        let open_ground = GiSettings {
+            probe_spacing: Some(1.0),
         };
-        assert_eq!(rooms.config().finest_spacing, 0.5);
+        assert_eq!(open_ground.config().finest_spacing, 1.0);
     }
 
     #[test]

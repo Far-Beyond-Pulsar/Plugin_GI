@@ -505,6 +505,11 @@ impl GiPass {
     pub fn clipmap(&self) -> Option<Clipmap> {
         self.state.clipmap
     }
+
+    /// The probes' records (`gi_probes`), for a reader outside the graph.
+    pub fn probes(&self) -> &wgpu::Buffer {
+        &self.state.probes
+    }
 }
 
 impl RenderPass for GiPass {
@@ -840,14 +845,14 @@ mod tests {
         b.entered_into(Some(&a), &mut kept);
         assert_eq!(kept, entered);
         // Another spacing: every probe is new.
-        let finer = Clipmap::around(DVec3::new(10.3, -4.0, 1e6 + 0.5), 0.5);
-        assert_eq!(finer.entered(Some(&a)).len(), PROBES as usize);
+        let coarser = Clipmap::around(DVec3::new(10.3, -4.0, 1e6 + 0.5), 1.0);
+        assert_eq!(coarser.entered(Some(&a)).len(), PROBES as usize);
     }
 
     #[test]
     fn the_eye_is_between_each_level_middle_probes() {
         let eye = DVec3::new(-123.45, 6.0, 789.0);
-        for finest in [DEFAULT_FINEST_SPACING, 0.5] {
+        for finest in [DEFAULT_FINEST_SPACING, 1.0] {
             let c = Clipmap::around(eye, finest);
             for level in 0..LEVELS {
                 let local = eye / c.spacing(level) - c.first[level].as_dvec3();
