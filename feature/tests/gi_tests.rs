@@ -4,7 +4,7 @@
 mod common;
 
 use common::{half2, pack, probe};
-use glam::{DVec3, Mat4, Vec3};
+use glam::{DVec3, Vec3};
 use helio_pass_gi::{
     Clipmap, GiConfig, GiPass, GiResolvePass, DEFAULT_FINEST_SPACING, LEVEL_PROBES, PROBES, RAYS,
 };
@@ -237,7 +237,11 @@ fn the_resolve_reads_the_probes_at_pixels() {
         normal.create_view(&Default::default()),
         depth.create_view(&Default::default()),
     );
-    let view = Mat4::look_to_rh(Vec3::ZERO, Vec3::new(0.2, -0.3, -1.0).normalize(), Vec3::Y);
+    let view = glam::camera::rh::view::look_to_mat4(
+        Vec3::ZERO,
+        Vec3::new(0.2, -0.3, -1.0).normalize(),
+        Vec3::Y,
+    );
     let proj = helio_core::depth::perspective(1.0, 1.0, 0.1);
     let camera = helio_core::GpuCameraUniforms::new(
         view,
