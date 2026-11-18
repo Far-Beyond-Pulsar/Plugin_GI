@@ -47,9 +47,10 @@ pub use helio_gi_api::{
 };
 
 /// The probes' rays (`SceneRay`, a row a ray, probe-major: 64 a probe in
-/// update-list order): the nearest hit and its surface.
+/// update-list order, each probe's a run from the probe: `Stream::run`):
+/// the nearest hit and its surface.
 pub fn probe_stream() -> Stream {
-    Stream::new("gi_probe", RayClass::Nearest, MAX_RAYS)
+    Stream::new("gi_probe", RayClass::Nearest, MAX_RAYS).with_run(RAYS)
 }
 
 /// The shadow rays of the probe rays' hits, toward the sun and one local
@@ -944,6 +945,9 @@ mod tests {
         let probes = probe_stream();
         assert_eq!(probes.class, RayClass::Nearest);
         assert_eq!(probes.capacity, MAX_RAYS);
+        // A probe's rays a run from it.
+        assert_eq!(probes.run, RAYS);
+        assert_eq!(shadow_stream().run, 1);
         let shadows = shadow_stream();
         assert_eq!(shadows.class, RayClass::Occlusion);
         // A sun ray and a local light's a probe ray at most.
