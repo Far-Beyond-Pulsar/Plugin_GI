@@ -422,6 +422,42 @@ fn probes_hold_until_geometry_answers() {
     assert_eq!(h.probes(), words, "the probes held while nothing answered");
 }
 
+/// A tracer that is late (its kernels still compiling) answers short: the
+/// probes hold while it does, though another tracer answers (a room here),
+/// so they do not learn a world without its geometry; once it answers in
+/// full they converge.
+#[test]
+fn probes_hold_while_a_tracer_answers_short() {
+    let late = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let setup = Setup {
+        sky: 5.0,
+        late: Some(late.clone()),
+        ..Default::default()
+    };
+    let eye = setup.world_eye();
+    let room = Shape::room(eye - 2000.0, eye + 2000.0, 0.0).glowing(1.0);
+    let Some(mut h) = harness(setup, vec![room]) else {
+        return;
+    };
+    h.frames(3);
+    assert!(
+        updated(&h.probes(), &h.clipmap(), |_| true).is_empty(),
+        "a probe took rays a late tracer answered short"
+    );
+    late.store(false, std::sync::atomic::Ordering::Relaxed);
+    h.frames(3);
+    let words = h.probes();
+    let lit = updated(&words, &h.clipmap(), |_| true);
+    assert!(lit.len() >= 3 * MAX_UPDATES as usize);
+    for &(index, _) in &lit {
+        let e = probe(&words, index, Vec3::X).0;
+        assert!(
+            (e - Vec3::ONE).abs().max_element() < 0.02,
+            "probe {index}: {e}"
+        );
+    }
+}
+
 /// Each stream counts its rays into the frame's statistics: every probe
 /// ray, and the shadow rays the hits asked for (a sun ray from each probe
 /// ray over sunlit ground).

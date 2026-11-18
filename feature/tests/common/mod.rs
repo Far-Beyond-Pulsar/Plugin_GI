@@ -405,6 +405,55 @@ pub fn analytic_tracer(shapes: Shapes, origin: DVec3) -> Tracer {
     }
 }
 
+/// A late tracer's pass: it traces nothing, and answers its stream short
+/// while `late` is set (a kind whose kernels still compile).
+struct LatePass {
+    late: Arc<std::sync::atomic::AtomicBool>,
+    answers: Arc<stream::Answers>,
+    reads: &'static [&'static str],
+    writes: &'static [&'static str],
+}
+
+impl RenderPass for LatePass {
+    fn name(&self) -> &'static str {
+        "LateTracer"
+    }
+
+    fn reads(&self) -> &'static [&'static str] {
+        self.reads
+    }
+
+    fn writes(&self) -> &'static [&'static str] {
+        self.writes
+    }
+
+    fn execute(&mut self, _ctx: &mut PassContext) -> HelioResult<()> {
+        if self.late.load(std::sync::atomic::Ordering::Relaxed) {
+            self.answers.short();
+        }
+        Ok(())
+    }
+}
+
+/// A tracer that knows geometry it cannot trace while `late` is set.
+pub fn late_tracer(late: Arc<std::sync::atomic::AtomicBool>) -> Tracer {
+    Tracer {
+        name: "late",
+        supported: Arc::new(|_| true),
+        trace: Arc::new(move |build, stream, _| {
+            let pass = LatePass {
+                late: late.clone(),
+                answers: stream::answers(build.env, stream),
+                reads: helio_frame_api::static_names(&[stream.header, stream.hits]),
+                writes: helio_frame_api::static_names(&[stream.hits]),
+            };
+            build.graph.add_pass(Box::new(pass));
+            Ok(())
+        }),
+        surface: Arc::new(|_, _, _| Ok(())),
+    }
+}
+
 /// Keeps GI's frame and probes (`gi_frame`, `gi_probes`) as they are
 /// published, for the test to read.
 struct Capture {
@@ -445,6 +494,8 @@ pub struct Setup {
     pub lights: Vec<helio_light_api::GpuLight>,
     /// Whether the analytic tracer is offered at all.
     pub traced: bool,
+    /// A second tracer, short while this is set ([`late_tracer`]).
+    pub late: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// An atmosphere whose sky is black (its frame and sky table published
     /// as the sky publishes them), over the flat sky.
     pub black_atmosphere: bool,
@@ -459,6 +510,7 @@ impl Default for Setup {
             sun: None,
             lights: Vec::new(),
             traced: true,
+            late: None,
             black_atmosphere: false,
         }
     }
@@ -555,6 +607,9 @@ pub fn build(
         .with_setting(GiSettings::default());
     if setup.traced {
         stream::offer(&mut env, analytic_tracer(shapes.clone(), setup.origin));
+    }
+    if let Some(late) = &setup.late {
+        stream::offer(&mut env, late_tracer(late.clone()));
     }
     let mut registry = NodeRegistry::new();
     FeatureSet::new()

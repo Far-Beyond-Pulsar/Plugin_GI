@@ -315,6 +315,8 @@ impl Default for GiConfig {
 pub struct GiPass {
     config: GiConfig,
     stream: Stream,
+    /// The probe stream's answers, started each frame.
+    answers: std::sync::Arc<stream::Answers>,
     state: Probes,
     layout: wgpu::BindGroupLayout,
     sun: wgpu::ComputePipeline,
@@ -336,7 +338,14 @@ pub struct GiPass {
 }
 
 impl GiPass {
-    pub fn new(device: &wgpu::Device, config: GiConfig, stats: &helio_core::FrameStats) -> Self {
+    /// The pass, its probe stream's answers `answers`
+    /// ([`stream::answers`]).
+    pub fn new(
+        device: &wgpu::Device,
+        config: GiConfig,
+        stats: &helio_core::FrameStats,
+        answers: std::sync::Arc<stream::Answers>,
+    ) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("GI update"),
             entries: &[
@@ -372,6 +381,7 @@ impl GiPass {
         Self {
             config,
             stream,
+            answers,
             state: Probes::new(device),
             sun: pipeline("gi_sun_main"),
             reset: pipeline("gi_reset"),
@@ -571,6 +581,7 @@ impl RenderPass for GiPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        self.answers.begin();
         let [atmosphere, sky_table] = sky(ctx.registry).map(|b| b.cloned());
         let directional = ctx
             .scene_buffers

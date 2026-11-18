@@ -47,6 +47,8 @@ pub(crate) const SNIPPETS: [helio_core::shader::ShaderSnippet; 8] = [
 pub struct GiLightPass {
     probes: Stream,
     shadows: Stream,
+    /// The shadow stream's answers, started each frame.
+    answers: std::sync::Arc<stream::Answers>,
     rays: StreamBuffers,
     pending: wgpu::Buffer,
     lights: LocalLights,
@@ -69,11 +71,12 @@ pub struct GiLightPass {
 impl GiLightPass {
     /// The pass, lighting the hits through the sun's transmittance `sun`
     /// published (none: the sun reaches every hit), counting its shadow rays
-    /// into `stats`.
+    /// into `stats`, the shadow stream's answers `answers`.
     pub fn new(
         device: &wgpu::Device,
         sun: Option<SunTransmittance>,
         stats: &helio_core::FrameStats,
+        answers: std::sync::Arc<stream::Answers>,
     ) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("GI light"),
@@ -169,6 +172,7 @@ impl GiLightPass {
             ]),
             probes,
             shadows,
+            answers,
         }
     }
 }
@@ -191,6 +195,7 @@ impl RenderPass for GiLightPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        self.answers.begin();
         let binding = |name: &str| ctx.registry.buffer_binding(name);
         let (
             Some(frame),

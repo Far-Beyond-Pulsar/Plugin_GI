@@ -1,6 +1,12 @@
 //! This frame's probe rays into their probes (`gi_integrate.wgsl`, README.md
 //! "The frame"), once the shadow stream's tracers answered: the probes
-//! update in the frame their rays were traced in.
+//! update in the frame their rays were traced in. On a frame where a tracer
+//! answered either stream short (`stream::Answers`: a kind's kernels still
+//! compiling, what it traces not drawn yet) the probes hold: rays that miss
+//! geometry a tracer knows of would teach them a world without it, and their
+//! history keeps what it is taught for many updates.
+
+use std::sync::Arc;
 
 use helio_core::{PassContext, RenderPass, Result as HelioResult};
 use helio_frame_api::rays::stream;
@@ -16,6 +22,8 @@ pub(crate) const SNIPPETS: [helio_core::shader::ShaderSnippet; 3] =
 
 /// The probes' integration (module docs).
 pub struct GiIntegratePass {
+    /// The probe stream's answers and the shadow stream's.
+    answers: [Arc<stream::Answers>; 2],
     layout: wgpu::BindGroupLayout,
     pipeline: wgpu::ComputePipeline,
     shadow_hits: &'static str,
@@ -24,7 +32,9 @@ pub struct GiIntegratePass {
 }
 
 impl GiIntegratePass {
-    pub fn new(device: &wgpu::Device) -> Self {
+    /// The pass, holding the probes on frames where `answers` (the probe
+    /// stream's, the shadow stream's) were short.
+    pub fn new(device: &wgpu::Device, answers: [Arc<stream::Answers>; 2]) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("GI integrate"),
             entries: &[
@@ -45,6 +55,7 @@ impl GiIntegratePass {
         let pipeline_layout = pipeline_layout(device, "GI integrate", &layout);
         let shadow_hits = crate::shadow_stream().hits;
         Self {
+            answers,
             pipeline: compute(device, &module, &pipeline_layout, "gi_integrate", &[]),
             layout,
             shadow_hits,
@@ -75,6 +86,9 @@ impl RenderPass for GiIntegratePass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        if !self.answers.iter().all(|a| a.complete()) {
+            return Ok(());
+        }
         let binding = |name: &str| ctx.registry.buffer_binding(name);
         let (Some(frame), Some(probes), Some(lists), Some(pending), Some(shadows), Some(answered)) = (
             binding(GI_FRAME),

@@ -145,10 +145,25 @@ update, then a slow blend), so the room would glow for seconds; holding
 leaves them as they were (not yet updated: the resolve's weight 0, the
 sky's ambient) until geometry answers.
 
+A tracer that knows geometry it cannot trace yet (the voxel terrain while
+its ray kernels compile, or before its first draw) answers its stream short
+(`stream::Answers`), and `GiIntegratePass` holds the probes that frame, though
+other tracers answered: rays that miss the late kind's geometry would teach
+the probes a world without it, and their history keeps what it is taught for
+many updates (a slab over terrain whose meshes answered first: the open
+ground's probes held 0.18 of light from below for hundreds of frames, where
+their rays found 0.26).
+
 **Known limit.** A scene emptied of all geometry keeps what its probes held
-(every ray misses, so they hold). Telling a scene loading from one that is
-empty needs a tracer to say it has work pending: a streaming-readiness
-contract, not a ray-stream field, and out of r1's scope.
+(every ray misses, so they hold): a tracer that cannot tell its geometry is
+still loading (the meshes before their first TLAS) is covered by the
+answered flag alone.
+
+**Occlusion distance.** GI offers the frame's
+`lighting::indirect_occlusion`: twice its finest spacing, the distance at
+which the probes resolve occlusion, wherever both its nodes build. A kind
+that lights its own surfaces (the voxel terrain's sky rays) adds the
+occlusion nearer than that and leaves the rest to the probes.
 
 `GiPass` publishes `gi_frame`, `gi_probes`, `gi_sun` and the probe stream;
 `GiLightPass` the shadow stream; the integration writes `gi_probes`. The

@@ -10,8 +10,17 @@
 //! joins at [`Slot::LightingInputs`], publishing the frame's indirect
 //! diffuse. Where nothing traces rays (no kind registered a tracer this
 //! device runs), neither builds.
+//!
+//! GI offers the distance at which its indirect diffuse resolves occlusion
+//! (`helio_frame_api::lighting::indirect_occlusion`): twice the finest
+//! probes' spacing, wherever both nodes build.
 
-use helio_feature_api::{Feature, FeatureRegistrar, NodeBuild, NodeDescriptor, ParamDesc};
+use std::sync::Arc;
+
+use helio_feature_api::{
+    BuildEnv, Feature, FeatureRegistrar, NodeBuild, NodeDescriptor, ParamDesc,
+};
+use helio_frame_api::lighting::indirect_occlusion::OfferIndirectOcclusion;
 use helio_frame_api::lighting::{inputs_order, sun_transmittance, InputsOrder};
 use helio_frame_api::rays::stream;
 use helio_frame_api::{FrameNode, Slot};
@@ -23,12 +32,38 @@ pub struct GiFeature;
 
 const CATEGORY: &str = "Passes: Lighting";
 
-fn settings(build: &NodeBuild<'_, '_>) -> GiSettings {
-    build
-        .env
-        .setting::<GiSettings>()
-        .copied()
-        .unwrap_or_default()
+fn settings(env: &BuildEnv<'_>) -> GiSettings {
+    env.setting::<GiSettings>().copied().unwrap_or_default()
+}
+
+/// The node names (`helio.pass.<name>`).
+const UPDATE: &str = "gi";
+const RESOLVE: &str = "gi_resolve";
+
+/// Probe spacings within which the probes do not hold an occluder: their
+/// irradiance at a point blends the probes of its cell, and a probe a
+/// spacing off an occluder sees past it; at two spacings every probe of the
+/// cell is on the occluder's near side.
+const OCCLUSION_SPACINGS: f32 = 2.0;
+
+/// Whether the probes' irradiance reaches the lighting in a graph built in
+/// `env`: something traces their rays, the lighting reads it after the
+/// resolve (not forward), and the graph builds both nodes.
+fn resolves(env: &mut BuildEnv<'_>) -> bool {
+    inputs_order(env) == InputsOrder::BeforeLighting
+        && [UPDATE, RESOLVE]
+            .iter()
+            .all(|name| env.plans(&helio_feature_api::pass_kind(name)))
+        && stream::traced(env) > 0
+}
+
+/// The distance GI's indirect diffuse resolves occlusion at in `env`'s
+/// graph (module docs), if it builds there.
+fn occlusion_distance(env: &mut BuildEnv<'_>) -> Option<f32> {
+    if !resolves(env) {
+        return None;
+    }
+    Some(OCCLUSION_SPACINGS * settings(env).config().finest_spacing as f32)
 }
 
 fn node(
@@ -58,21 +93,29 @@ fn build_update(build: &mut NodeBuild<'_, '_>) -> Result<(), String> {
         );
         return Ok(());
     }
-    let config = settings(build).config();
+    let config = settings(build.env).config();
     let sun = sun_transmittance::current(build.env);
     let device = build.env.device.clone();
     let stats = build.env.stats.clone();
+    let (probes, shadows) = (crate::probe_stream(), crate::shadow_stream());
+    let answers = [probes, shadows].map(|s| stream::answers(build.env, &s));
+    build.graph.add_pass(Box::new(GiPass::new(
+        &device,
+        config,
+        &stats,
+        answers[0].clone(),
+    )));
+    stream::trace(build, &probes)?;
+    build.graph.add_pass(Box::new(GiLightPass::new(
+        &device,
+        sun,
+        &stats,
+        answers[1].clone(),
+    )));
+    stream::trace(build, &shadows)?;
     build
         .graph
-        .add_pass(Box::new(GiPass::new(&device, config, &stats)));
-    stream::trace(build, &crate::probe_stream())?;
-    build
-        .graph
-        .add_pass(Box::new(GiLightPass::new(&device, sun, &stats)));
-    stream::trace(build, &crate::shadow_stream())?;
-    build
-        .graph
-        .add_pass(Box::new(GiIntegratePass::new(&device)));
+        .add_pass(Box::new(GiIntegratePass::new(&device, answers)));
     Ok(())
 }
 
@@ -89,9 +132,10 @@ impl Feature for GiFeature {
         registrar.swappable::<GiLightPass>();
         registrar.swappable::<GiIntegratePass>();
         registrar.swappable::<GiResolvePass>();
+        registrar.indirect_occlusion(Arc::new(occlusion_distance));
         registrar.node(
             node(
-                "gi",
+                UPDATE,
                 "GI: Probe Update",
                 "Traces this frame's probe rays and their shadow rays through every kind's \
                  tracer, lights the hits and integrates them into the probe clipmap. Builds \
@@ -103,12 +147,11 @@ impl Feature for GiFeature {
         );
         registrar.node(
             node(
-                "gi_resolve",
+                RESOLVE,
                 "GI: Resolve",
                 "The probes' irradiance at every pixel (the frame's indirect diffuse) for the lighting. Builds nothing where the lighting ran before it (forward) or nothing traces rays.",
                 |build| {
-                    let read = inputs_order(build.env) == InputsOrder::BeforeLighting;
-                    if read && stream::traced(build.env) > 0 {
+                    if resolves(build.env) {
                         build
                             .graph
                             .add_pass(Box::new(GiResolvePass::new(build.env.device)));
