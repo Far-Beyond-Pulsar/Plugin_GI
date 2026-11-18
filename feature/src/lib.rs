@@ -23,6 +23,9 @@ use helio_frame_api::lighting::sky::{
     SKY_FRAME, SKY_FRAME_BYTES, SKY_SNIPPET, SKY_TABLE, SKY_TABLE_BYTES, SKY_TABLE_SNIPPET,
 };
 use helio_frame_api::lighting::sun_transmittance::{self, SunTransmittance};
+use helio_frame_api::lighting::{
+    VIEW_REMAPS, VIEW_REMAPS_BYTES, VIEW_REMAP_SPACES, VIEW_REMAP_SPACES_BYTES,
+};
 use std::collections::VecDeque;
 
 mod feature;
@@ -637,8 +640,9 @@ pub struct GiResolvePass {
     /// The renderer's debug mode (`GI_PROBES_VIEW` shows the probes), and
     /// the one last written to `view`.
     view: wgpu::Buffer,
+    no_remaps: wgpu::Buffer,
     debug_mode: u32,
-    view_written: Option<u32>,
+    view_written: Option<(u32, bool)>,
     /// Its bind group, kept while it binds the same targets.
     cache: helio_core::gpu_cache::GpuCache,
 }
@@ -666,6 +670,9 @@ impl GiResolvePass {
                 texture(4, wgpu::TextureSampleType::Depth),
                 storage(5, false),
                 uniform(6, 16),
+                texture(7, wgpu::TextureSampleType::Float { filterable: false }),
+                uniform(8, VIEW_REMAPS_BYTES),
+                uniform(9, VIEW_REMAP_SPACES_BYTES),
             ],
         });
         let module = helio_core::shader::module_with(
@@ -696,11 +703,13 @@ impl GiResolvePass {
             16,
             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         );
+        let no_remaps = buffer(device, "GI no view remaps", VIEW_REMAPS_BYTES, wgpu::BufferUsages::UNIFORM);
         Self {
             layout,
             pipeline,
             out: None,
             view,
+            no_remaps,
             debug_mode: 0,
             view_written: None,
             cache: helio_core::gpu_cache::GpuCache::new(),
@@ -721,6 +730,20 @@ impl GiResolvePass {
         depth: &wgpu::TextureView,
         size: [u32; 2],
     ) {
+        self.record_with_remaps(device, queue, cmds, [frame, probes, camera], normal, depth, size, None);
+    }
+
+    fn record_with_remaps(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        cmds: &mut helio_core::CommandRecorder<'_>,
+        [frame, probes, camera]: [&wgpu::Buffer; 3],
+        normal: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        size: [u32; 2],
+        remaps: Option<(&wgpu::TextureView, &wgpu::Buffer, &wgpu::Buffer)>,
+    ) {
         let size = [size[0].max(1), size[1].max(1)];
         if self.out.as_ref().is_none_or(|(_, s)| *s != size) {
             let bytes = u64::from(size[0]) * u64::from(size[1]) * 8;
@@ -734,15 +757,17 @@ impl GiResolvePass {
                 size,
             ));
         }
-        if self.view_written != Some(self.debug_mode) {
+        let view = (self.debug_mode, remaps.is_some());
+        if self.view_written != Some(view) {
             helio_core::upload::write_buffer(
                 queue,
                 &self.view,
                 0,
-                bytemuck::cast_slice(&[self.debug_mode, 0, 0, 0]),
+                bytemuck::cast_slice(&[view.0, u32::from(view.1), 0, 0]),
             );
-            self.view_written = Some(self.debug_mode);
+            self.view_written = Some(view);
         }
+        let (surface, maps, spaces) = remaps.unwrap_or((normal, &self.no_remaps, &self.no_remaps));
         let Some((out, _)) = &self.out else { return };
         self.cache.end_frame();
         let group = self.cache.bind_group(
@@ -778,6 +803,18 @@ impl GiResolvePass {
                     wgpu::BindGroupEntry {
                         binding: 6,
                         resource: self.view.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::TextureView(surface),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: maps.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 9,
+                        resource: spaces.as_entire_binding(),
                     },
                 ],
             },
@@ -817,6 +854,9 @@ impl RenderPass for GiResolvePass {
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read(helio_frame_api::gbuffer::GROUP);
+        builder.read_optional(helio_frame_api::gbuffer::SURFACE);
+        builder.read_optional(VIEW_REMAPS);
+        builder.read_optional(VIEW_REMAP_SPACES);
     }
 
     fn render_pass_descriptor<'a>(
@@ -844,8 +884,14 @@ impl RenderPass for GiResolvePass {
                 helio_frame_api::gbuffer::GROUP.into(),
             ));
         };
+        let remaps = ctx
+            .registry
+            .texture_view(ResourceKey::new(helio_frame_api::gbuffer::SURFACE))
+            .zip(ctx.registry.buffer_binding(VIEW_REMAPS))
+            .zip(ctx.registry.buffer_binding(VIEW_REMAP_SPACES))
+            .map(|((surface, maps), spaces)| (surface, maps, spaces));
         let mut cmds = ctx.graphics_cmds();
-        self.record(
+        self.record_with_remaps(
             ctx.device,
             ctx.queue,
             &mut cmds,
@@ -853,6 +899,7 @@ impl RenderPass for GiResolvePass {
             gbuffer.views[1],
             ctx.depth,
             [ctx.width, ctx.height],
+            remaps,
         );
         Ok(())
     }
