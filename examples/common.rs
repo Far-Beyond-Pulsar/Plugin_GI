@@ -607,7 +607,10 @@ pub fn dump_reference(renderer: &helio::Renderer, prefix: &str) {
         return;
     };
     let (device, queue) = (renderer.device(), renderer.queue());
-    let mut buffers = vec![("reference", image.image.clone()), ("diffuse", image.diffuse.clone())];
+    let mut buffers = vec![
+        ("reference", image.image.clone()),
+        ("diffuse", image.diffuse.clone()),
+    ];
     buffers.extend(image.snapshot.clone().map(|s| ("realtime", s)));
     for (name, buffer) in buffers {
         let staging = device.create_buffer(&wgpu::BufferDescriptor {
@@ -619,7 +622,9 @@ pub fn dump_reference(renderer: &helio::Renderer, prefix: &str) {
         let mut encoder = device.create_command_encoder(&Default::default());
         encoder.copy_buffer_to_buffer(&buffer, 0, &staging, 0, buffer.size());
         queue.submit([encoder.finish()]);
-        staging.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+        staging
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |r| r.unwrap());
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         let pixels = (image.size[0] * image.size[1]) as usize * 16;
         let mut bytes = Vec::with_capacity(8 + pixels);

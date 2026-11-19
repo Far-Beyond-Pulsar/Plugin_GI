@@ -49,8 +49,8 @@ pub use settings::{GiSettings, GI};
 
 pub use helio_gi_api::{
     eye, Clipmap, GpuFrame, GpuLevel, DEFAULT_FINEST_SPACING, FRAME_BYTES, GI_COMMON_SNIPPET,
-    GI_FRAME, GI_IRRADIANCE, GI_PROBES, GI_PROBES_VIEW, GI_SAMPLE_SNIPPET, LEVELS,
-    LEVEL_PROBES, LEVEL_UPDATES, MAX_RAYS, MAX_UPDATES, PROBES, PROBE_WORDS, RAYS, SIDE,
+    GI_FRAME, GI_IRRADIANCE, GI_PROBES, GI_PROBES_VIEW, GI_SAMPLE_SNIPPET, LEVELS, LEVEL_PROBES,
+    LEVEL_UPDATES, MAX_RAYS, MAX_UPDATES, PROBES, PROBE_WORDS, RAYS, SIDE,
 };
 
 /// The probes' rays (`SceneRay`, a row a ray, probe-major: 64 a probe in
@@ -462,11 +462,7 @@ impl GiPass {
 
     /// Records the frame `begin` started: the probes that came in reset,
     /// this frame's rays (their hits cleared).
-    fn record(
-        &mut self,
-        device: &wgpu::Device,
-        cmds: &mut helio_core::CommandRecorder<'_>,
-    ) {
+    fn record(&mut self, device: &wgpu::Device, cmds: &mut helio_core::CommandRecorder<'_>) {
         let s = &self.state;
         self.cache.end_frame();
         let group = self.cache.bind_group(

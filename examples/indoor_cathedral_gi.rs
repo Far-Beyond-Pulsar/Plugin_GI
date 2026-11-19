@@ -646,7 +646,10 @@ impl ApplicationHandler for App {
             chandelier_light_ids,
             candle_light_ids,
             start_time: std::time::Instant::now(),
-            still: std::env::var("HELIO_STILL").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
+            still: std::env::var("HELIO_STILL")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
             lights_written: 0,
             rays,
             capture,
@@ -889,7 +892,12 @@ impl AppState {
         let cflicker = 1.0 + (time * 14.3).sin() * 0.07 + (time * 8.9).cos() * 0.05;
 
         // Update flickering chandelier intensities
-        for (i, &id) in self.chandelier_light_ids.iter().enumerate().filter(|_| write_lights) {
+        for (i, &id) in self
+            .chandelier_light_ids
+            .iter()
+            .enumerate()
+            .filter(|_| write_lights)
+        {
             let z = CHANDELIER_Z[i];
             update_light(
                 &mut self.scene_db.world,
@@ -898,7 +906,12 @@ impl AppState {
             );
         }
         // Update flickering candle intensities
-        for (i, &id) in self.candle_light_ids.iter().enumerate().filter(|_| write_lights) {
+        for (i, &id) in self
+            .candle_light_ids
+            .iter()
+            .enumerate()
+            .filter(|_| write_lights)
+        {
             let (x, y, z) = CANDLES[i];
             update_light(
                 &mut self.scene_db.world,
@@ -923,7 +936,9 @@ impl AppState {
             // shown), and the reference's sums at the capture.
             let dump = std::env::var("HELIO_REFERENCE_DUMP").ok();
             if dump.is_some() && self.capture.upcoming() + 1 == self.capture.at() {
-                if let Some(display) = renderer.find_pass::<helio_pass_reference::ReferenceDisplay>() {
+                if let Some(display) =
+                    renderer.find_pass::<helio_pass_reference::ReferenceDisplay>()
+                {
                     display.request_snapshot();
                 }
             }
