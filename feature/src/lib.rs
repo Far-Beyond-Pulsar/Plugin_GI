@@ -50,10 +50,10 @@ pub use helio_gi_api::{
 };
 
 /// The probes' rays (`SceneRay`, a row a ray, probe-major: 64 a probe in
-/// update-list order, each probe's a run from the probe: `Stream::run`):
-/// the nearest hit and its surface.
+/// update-list order): the nearest hit and its surface. Not runs: each ray
+/// starts behind its probe along its own direction (`gi_update.wgsl`).
 pub fn probe_stream() -> Stream {
-    Stream::new("gi_probe", RayClass::Nearest, MAX_RAYS).with_run(RAYS)
+    Stream::new("gi_probe", RayClass::Nearest, MAX_RAYS)
 }
 
 /// The shadow rays of the probe rays' hits, toward the sun and one local
@@ -671,7 +671,12 @@ impl GiResolvePass {
             16,
             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         );
-        let no_remaps = buffer(device, "GI no view remaps", VIEW_REMAPS_BYTES, wgpu::BufferUsages::UNIFORM);
+        let no_remaps = buffer(
+            device,
+            "GI no view remaps",
+            VIEW_REMAPS_BYTES,
+            wgpu::BufferUsages::UNIFORM,
+        );
         Self {
             layout,
             pipeline,
@@ -699,7 +704,16 @@ impl GiResolvePass {
         depth: &wgpu::TextureView,
         size: [u32; 2],
     ) {
-        self.record_with_remaps(device, queue, cmds, [frame, probes, camera], normal, depth, size, None);
+        self.record_with_remaps(
+            device,
+            queue,
+            cmds,
+            [frame, probes, camera],
+            normal,
+            depth,
+            size,
+            None,
+        );
     }
 
     fn record_with_remaps(
@@ -986,8 +1000,7 @@ mod tests {
         let probes = probe_stream();
         assert_eq!(probes.class, RayClass::Nearest);
         assert_eq!(probes.capacity, MAX_RAYS);
-        // A probe's rays a run from it.
-        assert_eq!(probes.run, RAYS);
+        assert_eq!(probes.run, 1);
         assert_eq!(shadow_stream().run, 1);
         let shadows = shadow_stream();
         assert_eq!(shadows.class, RayClass::Occlusion);

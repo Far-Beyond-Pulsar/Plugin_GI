@@ -66,12 +66,11 @@ whole update:
      the frame's space (the probes are eye-relative; the eye's frame
      position is added), each with no width at the probe and the spread of
      one of its probe's 64 rays (`GI_RAY_SPREAD`, sqrt(4 pi / 64)), its hit
-     cleared. A probe's 64 rays start at the probe itself, a run of the
-     stream (`Stream::with_run`: a tracer whose entry depends on the origin
-     alone, the voxel terrain's, places the probe once), and `gi_light`
-     takes a hit nearer the probe than `gi_ray_offset` (a few millimetres
-     and f32's rounding there) as an inside (a probe on a floor is dropped
-     whichever side rounding put it). The header's count is the CPU's
+     cleared. A ray starts `gi_ray_offset` (a few millimetres and f32's
+     rounding there) behind its probe along its own direction, and
+     `gi_light` takes a hit within that of the probe as an inside, so every
+     ray of a probe on a floor crosses the floor and the probe is dropped
+     whichever side rounding put it. The header's count is the CPU's
      (updated probes times 64).
 2. **The tracers** (`stream::trace`): each ray's nearest hit (`SceneHit`:
    distance, tracer, inside) and its `SceneSurface` (shading and face

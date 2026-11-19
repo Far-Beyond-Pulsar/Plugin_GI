@@ -78,7 +78,7 @@ fn gi_light(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     let probe = gi_probe_position(gi_lists[wg.x]);
     let dir = gi_ray_dir(li, frame_gi.rotation);
     let eye = gi_trace.eye.xyz;
-    let near = gi_ray_offset(probe + eye);
+    let behind = gi_ray_offset(probe + eye);
     let hit = probe_hits[i];
     // Shadow rays start as wide as the probe ray's footprint at its hit and
     // keep that width (no spread: a shadow ray stands for the probe ray's
@@ -92,12 +92,11 @@ fn gi_light(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     var want_local = false;
     if hit.t > 0.0 {
         atomicOr(&w_hit, 1u);
-        let t = hit.t;
+        let t = hit.t - behind;
         // Its inside: a back face (the probe is in a wall or a solid); and a
-        // probe on a surface (within `near` of it, f32's rounding of the
-        // probe's place): inside it, so probes on a floor are dropped alike,
-        // not some of them.
-        if scene_hit_inside(hit) || t < near {
+        // probe on a surface (within `behind` of it): inside it, so probes on
+        // a floor are dropped alike, not some of them.
+        if scene_hit_inside(hit) || t < behind {
             pending.t = -max(t, 1e-3);
         } else {
             pending.t = t;
