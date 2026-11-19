@@ -218,6 +218,16 @@ impl SurfaceCapture {
         }
     }
 
+    /// The number of the frame rendered next (from 1).
+    pub fn upcoming(&self) -> u32 {
+        self.frame + 1
+    }
+
+    /// The frame captured (`HELIO_CAPTURE_FRAME`).
+    pub fn at(&self) -> u32 {
+        self.at
+    }
+
     /// The surface's usage: a capture copies from it.
     pub fn usage(&self) -> wgpu::TextureUsages {
         let copy = if self.path.is_some() {
@@ -580,4 +590,44 @@ pub fn features() -> helio_feature_api::FeatureSet {
 /// The deferred preset with the lighting plugins' features.
 pub fn preset() -> helio_presets::PresetGraph {
     helio_mesh_host::presets::with(helio_presets::Preset::Deferred, &features())
+}
+
+/// Writes the reference path tracer's image (`<prefix>_reference.f32`, its
+/// indirect diffuse `_diffuse.f32`) and the real-time snapshot
+/// (`_realtime.f32`, when taken), each `width`, `height` (u32) then RGBA
+/// f32 a pixel (the reference's sum and its count of paths): what
+/// `scripts/r2/reference_compare.py` reads. Waits for the GPU: a host's
+/// measurement, not a frame's work.
+pub fn dump_reference(renderer: &helio::Renderer, prefix: &str) {
+    let Some(image) = renderer
+        .find_pass::<helio_pass_reference::ReferenceDisplay>()
+        .and_then(helio_pass_reference::ReferenceDisplay::image)
+    else {
+        eprintln!("[reference] no reference image: show debug view 60 or 61");
+        return;
+    };
+    let (device, queue) = (renderer.device(), renderer.queue());
+    let mut buffers = vec![("reference", image.image.clone()), ("diffuse", image.diffuse.clone())];
+    buffers.extend(image.snapshot.clone().map(|s| ("realtime", s)));
+    for (name, buffer) in buffers {
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Reference dump"),
+            size: buffer.size(),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(&buffer, 0, &staging, 0, buffer.size());
+        queue.submit([encoder.finish()]);
+        staging.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        let pixels = (image.size[0] * image.size[1]) as usize * 16;
+        let mut bytes = Vec::with_capacity(8 + pixels);
+        bytes.extend_from_slice(&image.size[0].to_le_bytes());
+        bytes.extend_from_slice(&image.size[1].to_le_bytes());
+        bytes.extend_from_slice(&staging.slice(..).get_mapped_range().unwrap()[..pixels]);
+        let path = format!("{prefix}_{name}.f32");
+        std::fs::write(&path, bytes).unwrap();
+        println!("[reference] {} frames -> {path}", image.frames);
+    }
 }
