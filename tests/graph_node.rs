@@ -21,7 +21,6 @@ const PLUGIN: &str = "pulsar.gi";
 /// it builds (the end of the type's name), in default graph order.
 const NODES: &[(&str, &str, &str)] = &[
     ("helio.pass.gi", "helio.gi", "GiPass"),
-    ("helio.pass.gi_mesh_trace", "helio.gi", "GiMeshTracePass"),
     ("helio.pass.gi_resolve", "helio.gi", "GiResolvePass"),
 ];
 
@@ -125,7 +124,8 @@ fn the_plugin_registers_its_nodes_in_the_default_graph_order() {
     let _serial = serial();
     pulsar_plugins::deactivate();
     let registry = registry();
-    let asset = default_asset(&registry);
+    // The default graph holds its passes in sections: their nodes, in order.
+    let asset = helio_graph_asset::sections::expand(&default_asset(&registry)).asset;
     let mut last = None;
     for (kind, feature, _) in NODES {
         let node = registry
@@ -163,8 +163,9 @@ fn the_graph_builds_the_passes_and_enabled_off_bypasses_them() {
     for ((kind, _, pass), count) in NODES.iter().zip(&built) {
         eprintln!("{kind} builds {count} {pass}");
     }
-    // GI builds where something can trace its probes (the meshes' rays need
-    // hardware ray queries), so a device without them builds fewer.
+    // GI builds where something traces rays (a kind's tracer the device
+    // runs: the meshes' need hardware ray queries), so a device or a plugin
+    // set without one builds none.
     assert!(built.iter().all(|count| *count <= 1), "{built:?}");
 
     // The Enabled parameter bypasses every one of the plugin's nodes.

@@ -38,7 +38,7 @@ use pulsar_scenedb::{Entity, SceneDb};
 
 use std::io::{self, BufRead};
 use std::sync::mpsc::Receiver;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use winit::{
     application::ApplicationHandler,
@@ -108,7 +108,7 @@ struct AppState {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     surface_format: wgpu::TextureFormat,
-    renderer: Arc<Mutex<Renderer>>,
+    renderer: std::cell::RefCell<Renderer>,
     action_rx: Receiver<HelioAction>,
     last_frame: std::time::Instant,
 
@@ -203,6 +203,8 @@ impl ApplicationHandler for App {
         device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
             panic!("[GPU UNCAPTURED ERROR] {:?}", e);
         }));
+        // GI's default probe spacing (half a metre) suits pillars and pews a
+        // few metres apart.
         let config = RendererConfig::new(size.width, size.height, format).with_feature(
             helio_light_api::ShadowSettings {
                 quality: helio_light_api::ShadowQuality::Ultra,
@@ -569,7 +571,9 @@ impl ApplicationHandler for App {
         )
         .expect("bake the cathedral");
 
-        let renderer = Arc::new(Mutex::new(renderer));
+        // The window thread's alone (the REPL thread talks through the
+        // command bridge).
+        let renderer = std::cell::RefCell::new(renderer);
         let (bridge, action_rx) = HelioCommandBridge::new();
         let command_bridge = Arc::new(bridge);
 
@@ -675,7 +679,7 @@ impl ApplicationHandler for App {
                     10 => 11,
                     _ => 0,
                 };
-                if let Ok(mut renderer) = state.renderer.lock() {
+                if let Ok(mut renderer) = state.renderer.try_borrow_mut() {
                     renderer.set_debug_mode(state.debug_mode);
                 }
                 println!("[debug] shadow debug mode = {}", state.debug_mode);
@@ -697,7 +701,7 @@ impl ApplicationHandler for App {
                     PerfOverlayMode::TileLightCount => PerfOverlayMode::PassOutput,
                     PerfOverlayMode::PassOutput => PerfOverlayMode::Disabled,
                 };
-                if let Ok(mut renderer) = state.renderer.lock() {
+                if let Ok(mut renderer) = state.renderer.try_borrow_mut() {
                     if let Some(pass) =
                         renderer.find_pass_mut::<helio_pass_perf_overlay::PerfOverlayPass>()
                     {
@@ -718,7 +722,7 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 state.debug_overlay_enabled = !state.debug_overlay_enabled;
-                if let Ok(mut renderer) = state.renderer.lock() {
+                if let Ok(mut renderer) = state.renderer.try_borrow_mut() {
                     if let Some(pass) =
                         renderer.find_pass_mut::<helio_pass_debug_overlay::DebugOverlayPass>()
                     {
@@ -776,7 +780,7 @@ impl ApplicationHandler for App {
                         color_space: wgpu::SurfaceColorSpace::Auto,
                     },
                 );
-                if let Ok(mut renderer) = state.renderer.lock() {
+                if let Ok(mut renderer) = state.renderer.try_borrow_mut() {
                     renderer.set_render_size(s.width, s.height);
                 }
             }
@@ -856,7 +860,7 @@ impl AppState {
         );
 
         // Apply commands from REPL / quark to renderer
-        let mut renderer = self.renderer.lock().unwrap();
+        let mut renderer = self.renderer.borrow_mut();
         while let Ok(action) = self.action_rx.try_recv() {
             match action {
                 HelioAction::SetDebugMode(mode) => renderer.set_debug_mode(mode),
@@ -910,6 +914,7 @@ impl AppState {
             {
                 log::error!("Render error: {e:?}");
             }
+            self.capture.timings(renderer.timing_snapshot());
             if self
                 .capture
                 .frame(&self.device, &self.queue, &output.texture)

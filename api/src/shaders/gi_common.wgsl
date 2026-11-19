@@ -1,13 +1,13 @@
-// World-space irradiance probes (README.md): the clipmap, a probe's record,
-// rays and hits. Shared by the update, the resolve and the tracers, which
-// bind `frame_gi` (a `GiFrame`).
+// World-space irradiance probes (README.md): the clipmap, a probe's record
+// and its rays' directions. Shared by GI's passes and any reader of the
+// probes, which bind `frame_gi` (a `GiFrame`).
 
 const GI_LEVELS: u32 = 6u;
 const GI_SIDE: u32 = 24u;
 const GI_LEVEL_PROBES: u32 = 13824u; // GI_SIDE^3
 const GI_PROBES: u32 = 82944u;
 const GI_RAYS: u32 = 64u;
-// Probes updated a frame at most (`gi_lists`' two update lists).
+// Probes updated a frame at most (`gi_lists`' update list).
 const GI_MAX_UPDATES: u32 = 2720u;
 // A probe's record in `gi_probes` (words): irradiance / pi as L1 spherical
 // harmonics (RGB, half floats in 6 words), its state, then its distance
@@ -34,45 +34,11 @@ struct GiFrame {
     // below it (rgb).
     sky: vec4<f32>,
     ground: vec4<f32>,
-    // Probes updated this frame, last frame, probes reset this frame, and
-    // which of `gi_lists`' update lists is this frame's.
-    counts: vec4<u32>,
-    // This frame's ray rotation (a unit quaternion), and last frame's.
+    // This frame's ray rotation (a unit quaternion).
     rotation: vec4<f32>,
-    prev_rotation: vec4<f32>,
-}
-
-// A ray (`gi_rays`): origin (eye-relative), the most distance; direction,
-// then its probe's storage index.
-struct GiRay {
-    origin: vec4<f32>,
-    dir: vec3<f32>,
-    probe: u32,
-}
-
-// A tracer's hit (`gi_hits`, one a ray): its distance (0: none), its normal
-// (packed, `gi_pack_unit`), albedo (RGB8) and the sun's visibility from it
-// (a byte in the albedo word's alpha); and in `light`, bytes: the tracer
-// (bits 0..8), the share of light the surface lets through from its far
-// side, tinted by its albedo (bits 8..16: foliage), the sun's visibility
-// from that far side (bits 16..24), and the light it gives off, its albedo
-// times this (bits 24..32: sixteenths).
-struct GiHit {
-    t: f32,
-    normal: u32,
-    albedo: u32,
-    light: u32,
-}
-
-fn gi_pack_unit(n: vec3<f32>) -> u32 {
-    let e = clamp(n * 0.5 + 0.5, vec3<f32>(0.0), vec3<f32>(1.0));
-    return u32(e.x * 1023.0 + 0.5) | (u32(e.y * 1023.0 + 0.5) << 10u) | (u32(e.z * 1023.0 + 0.5) << 20u);
-}
-
-fn gi_unpack_unit(p: u32) -> vec3<f32> {
-    let e = vec3<f32>(f32(p & 1023u), f32((p >> 10u) & 1023u), f32((p >> 20u) & 1023u)) / 1023.0;
-    let n = e * 2.0 - 1.0;
-    return n / max(length(n), 1e-6);
+    // Probes updated this frame, probes reset this frame.
+    updated: u32,
+    reset: u32,
 }
 
 // Probe `index`'s level, and its logical coordinates in its grid.

@@ -27,7 +27,7 @@ use pulsar_scenedb::{Entity, World};
 fn scene_db(device: &Arc<wgpu::Device>, queue: &Arc<wgpu::Queue>) -> pulsar_scenedb::SceneDb {
     let mut scene_db = pulsar_scenedb::SceneDb::new();
     let ctx = pulsar_scenedb::gpu::EngineGpuContext::new(device.clone(), queue.clone());
-    let mut store = pulsar_scenedb::gpu::SceneGpuStore::new(
+    let store = pulsar_scenedb::gpu::SceneGpuStore::new(
         &ctx,
         pulsar_scenedb::gpu::SceneGpuConfig {
             classes: Vec::new(),
@@ -35,11 +35,11 @@ fn scene_db(device: &Arc<wgpu::Device>, queue: &Arc<wgpu::Queue>) -> pulsar_scen
             max_cells_metadata: 0,
         },
     );
-    MeshComponent::register_gpu_columns_growable(&mut store, 64, device);
-    MaterialComponent::register_gpu_columns_growable(&mut store, 64, device);
-    StaticObjectComponent::register_gpu_columns_growable(&mut store, 64, device);
+    MeshComponent::register_gpu_columns_growable(&store, 64, device);
+    MaterialComponent::register_gpu_columns_growable(&store, 64, device);
+    StaticObjectComponent::register_gpu_columns_growable(&store, 64, device);
     helio_light_host::LightComponent::register_gpu_columns_growable(
-        &mut store,
+        &store,
         helio_light_api::MAX_LIGHTS,
         device,
     );
@@ -243,8 +243,10 @@ fn spawn_vg(
     (content, vgeo): (u128, Arc<dyn VgeoSource>),
     material: (Entity, MaterialComponent),
 ) -> Entity {
-    let mut vertex = helio_mesh_api::PackedVertex::default();
-    vertex.tex_coords0 = [7.0, 0.0];
+    let vertex = helio_mesh_api::PackedVertex {
+        tex_coords0: [7.0, 0.0],
+        ..Default::default()
+    };
     let mesh = world.spawn();
     world.insert(
         mesh,
@@ -557,7 +559,7 @@ impl Harness {
         read(
             &self.device,
             &self.queue,
-            self.renderer.find_pass::<GiPass>().unwrap().buffers()[1],
+            self.renderer.find_pass::<GiPass>().unwrap().probes(),
         )
     }
 }
@@ -867,8 +869,10 @@ fn measure_proxy_memory_and_tlas_rebuild() {
     let mut objects = Vec::new();
     let Some(mut harness) = Harness::new(true, |world, runtime| {
         room(world, true);
-        let mut vertex = helio_mesh_api::PackedVertex::default();
-        vertex.tex_coords0 = [9.0, 0.0];
+        let vertex = helio_mesh_api::PackedVertex {
+            tex_coords0: [9.0, 0.0],
+            ..Default::default()
+        };
         let mesh = world.spawn();
         world.insert(
             mesh,

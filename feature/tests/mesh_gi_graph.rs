@@ -1,8 +1,9 @@
 //! World-space GI in a mesh scene's default graph (no voxel terrain): with
-//! ray queries the probes are traced by the scene's meshes, and update only
-//! on frames whose renderer has a TLAS (`SceneDbRayTracing::partial`
-//! published); without ray queries there is no GI, the sky's ambient as
-//! before.
+//! ray queries the probes' streams are traced by the meshes' tracer
+//! (`helio-pass-mesh-rays`, in the meshes' features), and the probes hold
+//! until a frame's rays meet something (before the renderer has a TLAS:
+//! `SceneDbRayTracing::partial` published); without ray queries nothing
+//! traces rays, so there is no GI, the sky's ambient as before.
 
 use helio_light_host::LightComponent;
 use std::sync::Arc;
@@ -15,12 +16,13 @@ use helio::{
 use helio_mats::host_rows::MaterialComponent;
 use helio_mesh_host::ray_tracing::SceneDbRayTracing;
 use helio_mesh_host::{MeshComponent, StaticObjectComponent};
-use helio_pass_gi::{GiMeshTracePass, GiPass, PROBES, PROBE_WORDS};
+use helio_pass_gi::{GiPass, PROBES, PROBE_WORDS};
+use helio_pass_mesh_rays::MeshRayPass;
 
 fn scene_db(device: &Arc<wgpu::Device>, queue: &Arc<wgpu::Queue>) -> pulsar_scenedb::SceneDb {
     let mut scene_db = pulsar_scenedb::SceneDb::new();
     let ctx = pulsar_scenedb::gpu::EngineGpuContext::new(device.clone(), queue.clone());
-    let mut store = pulsar_scenedb::gpu::SceneGpuStore::new(
+    let store = pulsar_scenedb::gpu::SceneGpuStore::new(
         &ctx,
         pulsar_scenedb::gpu::SceneGpuConfig {
             classes: Vec::new(),
@@ -28,11 +30,11 @@ fn scene_db(device: &Arc<wgpu::Device>, queue: &Arc<wgpu::Queue>) -> pulsar_scen
             max_cells_metadata: 0,
         },
     );
-    MeshComponent::register_gpu_columns_growable(&mut store, 64, device);
-    MaterialComponent::register_gpu_columns_growable(&mut store, 64, device);
-    StaticObjectComponent::register_gpu_columns_growable(&mut store, 64, device);
+    MeshComponent::register_gpu_columns_growable(&store, 64, device);
+    MaterialComponent::register_gpu_columns_growable(&store, 64, device);
+    StaticObjectComponent::register_gpu_columns_growable(&store, 64, device);
     helio_light_host::LightComponent::register_gpu_columns_growable(
-        &mut store,
+        &store,
         helio_light_api::MAX_LIGHTS,
         device,
     );
@@ -241,7 +243,7 @@ fn a_mesh_scene_s_probes_trace_its_meshes_on_frames_with_a_tlas() {
                 config.surface_format,
             );
     assert!(
-        renderer.find_pass::<GiMeshTracePass>().is_some(),
+        renderer.find_pass::<MeshRayPass>().is_some(),
         "no mesh tracer in the graph"
     );
     let target = device.create_texture(&wgpu::TextureDescriptor {
@@ -272,10 +274,10 @@ fn a_mesh_scene_s_probes_trace_its_meshes_on_frames_with_a_tlas() {
         read(
             &device,
             &queue,
-            renderer.find_pass::<GiPass>().unwrap().buffers()[1],
+            renderer.find_pass::<GiPass>().unwrap().probes(),
         )
     };
-    // No TLAS published: the probes wait.
+    // No TLAS published: every ray misses, and the probes hold.
     for _ in 0..3 {
         scene.world.flush_gpu_mirror(&queue);
         renderer.render(&camera, &view).unwrap();
@@ -315,7 +317,7 @@ fn without_ray_queries_a_mesh_scene_has_no_gi() {
     }))
     .unwrap();
     let (device, queue) = (Arc::new(device), Arc::new(queue));
-    assert!(GiMeshTracePass::new(&device, &queue).is_none());
+    assert!(!helio_pass_mesh_rays::mesh_rays_supported(&device));
     let mut scene = scene_db(&device, &queue);
     room(&mut scene.world);
     let config = RendererConfig::new(32, 32, wgpu::TextureFormat::Rgba8Unorm);
