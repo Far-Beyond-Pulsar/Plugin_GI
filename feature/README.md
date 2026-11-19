@@ -57,9 +57,6 @@ once a frame at `Slot::Geometry`, after the G-buffer phase, and holds the
 whole update:
 
 1. **`GiPass`** (the probe stream's generator):
-   - `gi_sun_main`: the sun. With an atmosphere, its direction and its
-     illuminance through the air to the eye; without one, the lights'
-     primary directional light.
    - `gi_reset`: the probes that came into the clipmap.
    - `gi_rays_main`: this frame's rays into the probe stream (`gi_probe`,
      `RayClass::Nearest`, `MAX_RAYS` rows: 64 a probe, in update order), in
@@ -75,50 +72,50 @@ whole update:
 2. **The tracers** (`stream::trace`): each ray's nearest hit (`SceneHit`:
    distance, tracer, inside) and its `SceneSurface` (shading and face
    normals on the side the ray met, base colour, transmission, emission).
-3. **`GiLightPass`** (`gi_light.wgsl`, a workgroup a probe, a lane a ray;
-   the shadow stream's generator). For a ray that met an outside:
-   - the sun's light off the side of the surface that faces it (`base *
-     sun * clouds * cos / pi`), or, for a surface with a transmission share
-     whose far side faces it, that share of it through the surface (a leaf
-     lit from behind), waiting on a shadow ray from that side;
-   - one local light (`local_lights`: the scene's point and spot lights
-     gathered once a frame, one chosen at the hit by weighted reservoir over
-     their unshadowed light, over its chance), waiting on a shadow ray to
-     it. This is GI's stand-in for the frame's light sampling, which the
-     lights plugin will own (rendering.md, r5);
-   - the rest, unshadowed: `base * (probe irradiance at the hit + share *
-     probe irradiance from its far side) + emission` (the probes' own
-     irradiance gives every further bounce), read before any probe of the
-     frame is written.
+3. **`GiLightPass`** (`gi_light`, a workgroup a probe, a lane a ray; the
+   light batch's generator). For a ray that met an outside:
+   - the light that waits on no shadow ray: `base * (probe irradiance at
+     the hit + share * probe irradiance from its far side) + emission` (the
+     probes' own irradiance gives every further bounce), read before any
+     probe of the frame is written;
+   - a light query at the hit (`LightQuery`: its place, the probe ray's
+     footprint there, its normal, lit from both sides when it lets light
+     through, the probes' coordinate space), packed into GI's light batch
+     (`gi_probe`, `light_batch()`) from row 0, a workgroup's together.
 
    A miss takes the sky: the atmosphere's sky table at the probe,
    cosine-convolved L2 harmonics turned back into radiance band by band;
    without an atmosphere, the flat ambient above the horizon and 0.15 of it
-   below. `clouds` is the share of the sun the media let through to the hit
-   (the frame's `sun_transmittance`, the sky's clouds publish it): without
-   it, ground under a cloud was lit by bounce from ground the cloud shades.
-   What waits on a shadow ray, and the rest, go into `gi_pending` (RGB9E5,
-   24 bytes a ray). The shadow rays start off the surface along its face
-   normal by `0.002 + 4e-6 * |p|` (a few ulps of f32 at the point), as wide
-   as the probe ray's footprint at the hit (`GI_RAY_SPREAD * t`), keeping
-   that width (no spread), as cut-outs on the way are tested at it. They are
-   packed into the shadow stream (`gi_shadow`, `RayClass::Occlusion`, up to
-   two a probe ray) from row 0, a workgroup's together (its sun rays, then
-   its local lights'), counted by a workgroup atomic and one global atomic
-   a workgroup; a one-invocation dispatch writes the stream's dispatch from
-   the count. Packed rather than two fixed rows a ray (an empty row
-   `t_max = 0`): half or more of the rows would be empty (misses, insides,
-   surfaces facing away from the sun, scenes without local lights), and a
-   tracer's wave costs its slowest lane, so empty lanes beside a terrain
-   walk cost a whole walk; packing costs a few atomics a workgroup and
-   8 bytes a ray (the rows in `gi_pending`).
-4. **The tracers** of the shadow stream: what gets through each, per
-   channel. The terrain's shadow of the sun at a hit is its tracer's answer,
-   and a local light's shadow ray sees every kind (terrain too).
-5. **`GiIntegratePass`** (`gi_integrate.wgsl`, a workgroup a probe, a lane
-   a ray): a ray's radiance is `sun * through + local * through + rest`,
-   the model before streams (`base * (sun * through * clouds * cos / pi +
-   probe irradiance) + local * through + emission`); an inside gives
+   below. What it has into `gi_pending` (RGB9E5, 16 bytes a ray).
+4. **The light samplers** (`light_samples::sample`): every kind of light
+   that registered a sampler offers one of its lights at each query (the
+   lights' sampler: its point, spot and directional lights, the sun through
+   the air and the clouds' transmittance, `helio-pass-light-sampler`), and
+   the row keeps one, chosen in proportion to what each brings. GI reads no
+   light kind's rows: the sun is one more sample. Why the sun is not GI's
+   own any more: it took a second shadow ray at every hit whether or not a
+   local light lit it; one sample a hit chooses the sun where it dominates
+   (outdoors, every time but where a lamp outshines it) and a lamp where it
+   does, so outdoors costs the same rays and indoors half.
+5. **`GiShadowPass`** (`gi_shadow`): each hit's sample off its surface
+   (`base * radiance * cos / pi` on the side the light is on; a surface
+   with a transmission share whose far side faces the light lets that share
+   through), waiting on a shadow ray from that side. The shadow rays start
+   off the surface along its face normal by `0.002 + 4e-6 * |p|` (a few
+   ulps of f32 at the point), as wide as the probe ray's footprint at the
+   hit (`GI_RAY_SPREAD * t`), keeping that width (no spread), as cut-outs on
+   the way are tested at it, and end short of a local light (a directional
+   light's reach a planet across). They are packed into the shadow stream
+   (`gi_shadow`, `RayClass::Occlusion`, one a probe ray at most) from row 0,
+   a workgroup's together; a one-invocation dispatch writes the stream's
+   dispatch from the count. Packed rather than a fixed row a ray (an empty
+   row `t_max = 0`): misses, insides and unlit hits would be empty rows,
+   and a tracer's wave costs its slowest lane.
+6. **The tracers** of the shadow stream: what gets through each, per
+   channel (the terrain's shadow of the sun at a hit is its tracer's
+   answer; a lamp's shadow ray sees every kind).
+7. **`GiIntegratePass`** (`gi_integrate.wgsl`, a workgroup a probe, a lane
+   a ray): a ray's radiance is `light * through + rest`; an inside gives
    nothing. Once a probe holds light, a ray's radiance is capped at 16 times
    the probe's mean irradiance / pi plus 2: a ray meeting a surface
    centimetres from a point light (its fitting) would otherwise dominate its
@@ -166,8 +163,8 @@ which the probes resolve occlusion, wherever both its nodes build. A kind
 that lights its own surfaces (the voxel terrain's sky rays) adds the
 occlusion nearer than that and leaves the rest to the probes.
 
-`GiPass` publishes `gi_frame`, `gi_probes`, `gi_sun` and the probe stream;
-`GiLightPass` the shadow stream; the integration writes `gi_probes`. The
+`GiPass` publishes `gi_frame`, `gi_probes` and the probe stream;
+`GiLightPass` the light batch, `GiShadowPass` the shadow stream; the integration writes `gi_probes`. The
 frame statistics count each stream's rays (`rays.gi_probe` on the CPU,
 `rays.gi_shadow` on the GPU).
 
@@ -185,12 +182,13 @@ Near its grid's edge, the level blends into the next one.
 
 ## Costs (targets, 1080p, RTX 3060 class)
 
-2720 probe updates a frame (174k probe rays, up to 348k shadow rays): about
+2720 probe updates a frame (174k probe rays and light queries, up to 174k shadow rays): about
 2 ms with the terrain tracer. GI's own passes are the generation, the hits'
-light (probe samples at each hit, one loop over at most 256 local lights)
-and the integration; the tracers' cost is theirs. CPU work a frame: the
+light (probe samples at each hit, a light query) and its samples' shadow
+rays, and the integration; the samplers' cost is theirs; the tracers' cost is theirs. CPU work a frame: the
 probes that came in and the update list (it scales with the probes
 updated), three small uploads; bind groups are kept while their inputs
 stay. Memory: 6 x 24^3 probes x 288 bytes (24 MB); the probe stream's rows
-(68 bytes a ray, 11.8 MB), the shadow stream's (48 bytes a row, 16.7 MB)
-and the pending light (24 bytes a ray, 4.2 MB).
+(80 bytes a ray, 13.9 MB), the light batch's (64 bytes a query, 11.1 MB),
+the shadow stream's (48 bytes a row, 8.4 MB) and the pending light (16
+bytes a ray, 2.8 MB).
