@@ -6,7 +6,9 @@
 //! the frame being drawn, and the probes take this frame's rays before the
 //! resolve reads them. Its node holds the whole update: the probe stream's
 //! generator, the stream's tracers (`stream::trace`), the hits' light and
-//! the shadow stream's generator, its tracers, the integration. The resolve
+//! their light batch, the frame's light samplers (`light_samples::sample`),
+//! the shadow stream's generator, its tracers, the integration. GI reads no
+//! light kind: what lights its hits comes as light samples. The resolve
 //! joins at [`Slot::LightingInputs`], publishing the frame's indirect
 //! diffuse. Where nothing traces rays (no kind registered a tracer this
 //! device runs), neither builds.
@@ -21,11 +23,11 @@ use helio_feature_api::{
     BuildEnv, Feature, FeatureRegistrar, NodeBuild, NodeDescriptor, ParamDesc,
 };
 use helio_frame_api::lighting::indirect_occlusion::OfferIndirectOcclusion;
-use helio_frame_api::lighting::{inputs_order, sun_transmittance, InputsOrder};
-use helio_frame_api::rays::stream;
+use helio_frame_api::lighting::{inputs_order, InputsOrder};
+use helio_frame_api::rays::{light_samples, stream};
 use helio_frame_api::{FrameNode, Slot};
 
-use crate::{GiIntegratePass, GiLightPass, GiPass, GiResolvePass, GiSettings};
+use crate::{GiIntegratePass, GiLightPass, GiPass, GiResolvePass, GiSettings, GiShadowPass};
 
 /// World-space diffuse GI ([`crate`]).
 pub struct GiFeature;
@@ -94,7 +96,6 @@ fn build_update(build: &mut NodeBuild<'_, '_>) -> Result<(), String> {
         return Ok(());
     }
     let config = settings(build.env).config();
-    let sun = sun_transmittance::current(build.env);
     let device = build.env.device.clone();
     let stats = build.env.stats.clone();
     let (probes, shadows) = (crate::probe_stream(), crate::shadow_stream());
@@ -106,9 +107,10 @@ fn build_update(build: &mut NodeBuild<'_, '_>) -> Result<(), String> {
         answers[0].clone(),
     )));
     stream::trace(build, &probes)?;
-    build.graph.add_pass(Box::new(GiLightPass::new(
+    build.graph.add_pass(Box::new(GiLightPass::new(&device)));
+    light_samples::sample(build, &crate::light_batch())?;
+    build.graph.add_pass(Box::new(GiShadowPass::new(
         &device,
-        sun,
         &stats,
         answers[1].clone(),
     )));
@@ -125,11 +127,10 @@ impl Feature for GiFeature {
     }
 
     fn register(&self, registrar: &mut FeatureRegistrar<'_>) {
-        registrar.consumes(helio_light_api::DIRECTIONAL_LIGHTS_ROW);
-        registrar.consumes(helio_light_api::SCENE_LIGHTS);
         // What shader hot reload may swap without rebuilding the graph.
         registrar.swappable::<GiPass>();
         registrar.swappable::<GiLightPass>();
+        registrar.swappable::<GiShadowPass>();
         registrar.swappable::<GiIntegratePass>();
         registrar.swappable::<GiResolvePass>();
         registrar.indirect_occlusion(Arc::new(occlusion_distance));

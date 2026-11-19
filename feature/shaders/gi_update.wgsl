@@ -1,12 +1,9 @@
-//!use light_list
-//!use frame_sky
-//!use sky_table
 //!use frame_ray_stream
 //!use gi_common
 //!use gi_rays
-// The start of the probes' update (README.md, "The frame"): the sun found,
-// probes that came into the clipmap reset, this frame's probe rays written
-// into the probe stream for the tracers.
+// The start of the probes' update (README.md, "The frame"): probes that
+// came into the clipmap reset, this frame's probe rays written into the probe
+// stream for the tracers.
 
 @group(0) @binding(0) var<uniform> frame_gi: GiFrame;
 @group(0) @binding(1) var<storage, read_write> gi_probes: array<u32>;
@@ -17,33 +14,7 @@
 // This frame's update list (GI_MAX_UPDATES probes), then the probes to
 // reset.
 @group(0) @binding(4) var<storage, read> gi_lists: array<u32>;
-// The sun: towards it (xyz), its illuminance at the eye (rgb).
-@group(0) @binding(5) var<storage, read_write> gi_sun: array<vec4<f32>, 2>;
-// The lights' directional lights (`helio_light_api::DIRECTIONAL_LIGHTS`),
-// the first the primary sun.
-@group(0) @binding(6) var<storage, read> directional: DirectionalLights;
-@group(0) @binding(7) var<uniform> sky_frame: SkyFrame;
-@group(0) @binding(8) var<uniform> sky_table: array<vec4<f32>, 2304>;
-@group(0) @binding(9) var<uniform> gi_trace: GiTrace;
-
-// The sun: the atmosphere's, through the air to the eye; without one, the
-// lights' primary sun.
-@compute @workgroup_size(1)
-fn gi_sun_main() {
-    if sky_frame.planet.w > 0.5 {
-        let towards = sky_frame.sun.xyz;
-        gi_sun[0] = vec4<f32>(towards, 0.0);
-        gi_sun[1] = vec4<f32>(sky_frame.sun_illuminance.rgb * sky_transmittance_towards(sky_frame, vec3<f32>(0.0), towards), 0.0);
-        return;
-    }
-    if directional.count.x > 0u {
-        gi_sun[0] = vec4<f32>(directional.lights[0].toward.xyz, 0.0);
-        gi_sun[1] = vec4<f32>(directional.lights[0].radiance.rgb, 0.0);
-        return;
-    }
-    gi_sun[0] = vec4<f32>(0.0, 1.0, 0.0, 0.0);
-    gi_sun[1] = vec4<f32>(0.0);
-}
+@group(0) @binding(5) var<uniform> gi_trace: GiTrace;
 
 // Probes that came into the clipmap: no light, no distances, no updates
 // (before this frame's integration, which may update them at once).

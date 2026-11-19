@@ -6,15 +6,21 @@
 //! (`helio_frame_api::rays::stream`) and knows no kind. Each frame, after the
 //! G-buffer phase (the frame's geometry as it was drawn):
 //!
-//! 1. [`GiPass`]: the sun, the probes that came into the clipmap reset, this
+//! 1. [`GiPass`]: the probes that came into the clipmap reset, this
 //!    frame's probe rays into the probe stream ([`probe_stream`]).
 //! 2. The kinds' tracers answer it (`stream::trace`): each ray's nearest hit
 //!    and its surface.
-//! 3. [`GiLightPass`]: the light of every hit, the part of it that waits on
-//!    a shadow ray (the sun's, one local light's) put aside, and those
-//!    shadow rays into the shadow stream ([`shadow_stream`]).
-//! 4. The tracers answer that (what gets through each).
-//! 5. [`GiIntegratePass`]: the rays' radiance into their probes, this frame.
+//! 3. [`GiLightPass`]: the light of every hit that waits on no shadow ray,
+//!    and a light query a hit into GI's light batch ([`light_batch`]).
+//! 4. The frame's light samplers answer it (`light_samples::sample`): one
+//!    light a hit, from every kind of light that registered a sampler (the
+//!    sun among them).
+//! 5. [`GiShadowPass`]: each hit's light sample off its surface, waiting on
+//!    a shadow ray, and those rays into the shadow stream ([`shadow_stream`]).
+//! 6. The tracers answer that (what gets through each).
+//! 7. [`GiIntegratePass`]: the rays' radiance into their probes, this frame.
+//!
+//! GI reads no light kind's rows: lights reach it as light samples.
 //!
 //! [`GiResolvePass`] runs before deferred lighting: the probes' irradiance at
 //! every pixel (`gi_irradiance`). The clipmap is a function of the eye's
@@ -24,28 +30,26 @@
 use glam::{DVec3, Vec3};
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, ResourceKey, Result as HelioResult};
-use helio_frame_api::lighting::sky::{
-    SKY_FRAME, SKY_FRAME_BYTES, SKY_SNIPPET, SKY_TABLE, SKY_TABLE_BYTES, SKY_TABLE_SNIPPET,
-};
+use helio_frame_api::lighting::sky::{SKY_FRAME, SKY_TABLE};
 use helio_frame_api::lighting::{
     VIEW_REMAPS, VIEW_REMAPS_BYTES, VIEW_REMAP_SPACES, VIEW_REMAP_SPACES_BYTES,
 };
+use helio_frame_api::rays::light_samples::LightBatch;
 use helio_frame_api::rays::stream::{self, RayClass, Stream, StreamBuffers, SurfaceDetail};
 use std::collections::VecDeque;
 
 mod feature;
 mod integrate;
 mod light;
-pub mod local_lights;
 pub mod settings;
 pub use feature::GiFeature;
 pub use integrate::GiIntegratePass;
-pub use light::GiLightPass;
+pub use light::{GiLightPass, GiShadowPass};
 pub use settings::{GiSettings, GI};
 
 pub use helio_gi_api::{
     eye, Clipmap, GpuFrame, GpuLevel, DEFAULT_FINEST_SPACING, FRAME_BYTES, GI_COMMON_SNIPPET,
-    GI_FRAME, GI_IRRADIANCE, GI_PROBES, GI_PROBES_VIEW, GI_SAMPLE_SNIPPET, GI_SUN, LEVELS,
+    GI_FRAME, GI_IRRADIANCE, GI_PROBES, GI_PROBES_VIEW, GI_SAMPLE_SNIPPET, LEVELS,
     LEVEL_PROBES, LEVEL_UPDATES, MAX_RAYS, MAX_UPDATES, PROBES, PROBE_WORDS, RAYS, SIDE,
 };
 
@@ -56,11 +60,18 @@ pub fn probe_stream() -> Stream {
     Stream::new("gi_probe", RayClass::Nearest, MAX_RAYS).with_detail(SurfaceDetail::Diffuse)
 }
 
-/// The shadow rays of the probe rays' hits, toward the sun and one local
-/// light: as many rows as there are such rays this frame, packed from 0
-/// (the light pass writes the count on the GPU), at most two a probe ray.
+/// The shadow rays of the probe rays' hits, toward each hit's light sample:
+/// as many rows as there are such rays this frame, packed from 0 (the
+/// shadow pass writes the count on the GPU), at most one a probe ray.
 pub fn shadow_stream() -> Stream {
-    Stream::new("gi_shadow", RayClass::Occlusion, 2 * MAX_RAYS)
+    Stream::new("gi_shadow", RayClass::Occlusion, MAX_RAYS)
+}
+
+/// The probe rays' hits asking the frame's light samplers for one light
+/// each: as many queries as hits this frame, packed from 0 (the light pass
+/// writes the count on the GPU).
+pub fn light_batch() -> LightBatch {
+    LightBatch::new("gi_probe", MAX_RAYS)
 }
 
 /// GI's own graph keys between its passes: this frame's update and reset
@@ -81,7 +92,11 @@ struct GpuTrace {
 
 const TRACE_BYTES: u64 = std::mem::size_of::<GpuTrace>() as u64;
 /// Bytes of a `GiPending`.
-const PENDING_BYTES: u64 = 24;
+const PENDING_BYTES: u64 = 16;
+
+/// The snippets `gi_update.wgsl` is built with.
+const UPDATE_SNIPPETS: [helio_core::shader::ShaderSnippet; 3] =
+    [stream::SNIPPET, GI_COMMON_SNIPPET, GI_RAYS_SNIPPET];
 
 /// The probe rays' WGSL (`gi_rays.wgsl`, `//!use gi_rays`).
 const GI_RAYS_SNIPPET: helio_core::shader::ShaderSnippet =
@@ -236,7 +251,7 @@ fn compute(
 
 /// The atmosphere's frame and sky table, as the sky publishes them (registry
 /// values under `SKY_FRAME` and `SKY_TABLE`), if any: the one lookup GI's
-/// passes share (the sun, the sky a probe ray meets).
+/// passes share (the sky a probe ray meets).
 fn sky<'a>(registry: &helio_core::ResourceRegistry<'a>) -> [Option<&'a wgpu::Buffer>; 2] {
     [SKY_FRAME, SKY_TABLE].map(|name| registry.get::<&'a wgpu::Buffer>(ResourceKey::new(name)))
 }
@@ -259,7 +274,6 @@ struct Probes {
     probes: wgpu::Buffer,
     /// This frame's update list (`MAX_UPDATES`), then its reset list.
     lists: wgpu::Buffer,
-    sun: wgpu::Buffer,
     trace: wgpu::Buffer,
     answered: wgpu::Buffer,
     rays: StreamBuffers,
@@ -287,7 +301,6 @@ impl Probes {
                 u64::from(MAX_UPDATES + PROBES) * 4,
                 storage,
             ),
-            sun: buffer(device, "GI sun", 32, storage),
             trace: buffer(device, "GI trace", TRACE_BYTES, uniform),
             answered: buffer(device, "GI answered", 16, storage),
             rays: StreamBuffers::new(device, &probe_stream()),
@@ -323,12 +336,8 @@ pub struct GiPass {
     answers: std::sync::Arc<stream::Answers>,
     state: Probes,
     layout: wgpu::BindGroupLayout,
-    sun: wgpu::ComputePipeline,
     reset: wgpu::ComputePipeline,
     rays: wgpu::ComputePipeline,
-    fallback_atmosphere: wgpu::Buffer,
-    fallback_sky_table: wgpu::Buffer,
-    fallback_directional: wgpu::Buffer,
     cache: helio_core::gpu_cache::GpuCache,
     /// The frame's statistics and the probe stream's count in them.
     stats: helio_core::FrameStats,
@@ -358,54 +367,32 @@ impl GiPass {
                 storage(2, false),
                 storage(3, false),
                 storage(4, true),
-                storage(5, false),
-                storage(6, true),
-                uniform(7, SKY_FRAME_BYTES),
-                uniform(8, SKY_TABLE_BYTES),
-                uniform(9, TRACE_BYTES),
+                uniform(5, TRACE_BYTES),
             ],
         });
         let module = helio_core::shader::module_with(
             device,
             "GI update",
             helio_core::include_wgsl!("../shaders/gi_update.wgsl"),
-            &[
-                SKY_SNIPPET,
-                SKY_TABLE_SNIPPET,
-                stream::SNIPPET,
-                GI_COMMON_SNIPPET,
-                GI_RAYS_SNIPPET,
-                helio_light_api::LIGHT_LIST_SNIPPET,
-            ],
+            &UPDATE_SNIPPETS,
         );
         let pipeline_layout = pipeline_layout(device, "GI update", &layout);
         let pipeline = |entry: &str| compute(device, &module, &pipeline_layout, entry, &[]);
-        let uniform = wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST;
         let stream = probe_stream();
         Self {
             config,
             stream,
             answers,
             state: Probes::new(device),
-            sun: pipeline("gi_sun_main"),
             reset: pipeline("gi_reset"),
             rays: pipeline("gi_rays_main"),
             layout,
-            fallback_atmosphere: buffer(device, "GI no atmosphere", SKY_FRAME_BYTES, uniform),
-            fallback_sky_table: buffer(device, "GI no sky table", SKY_TABLE_BYTES, uniform),
-            fallback_directional: buffer(
-                device,
-                "GI no directional lights",
-                std::mem::size_of::<helio_light_api::DirectionalLights>() as u64,
-                wgpu::BufferUsages::STORAGE,
-            ),
             cache: helio_core::gpu_cache::GpuCache::new(),
             stats: stats.clone(),
             stat: stream.stat(stats),
             writes: helio_frame_api::static_names(&[
                 GI_FRAME,
                 GI_PROBES,
-                GI_SUN,
                 GI_LISTS,
                 GI_TRACE,
                 GI_ANSWERED,
@@ -473,17 +460,12 @@ impl GiPass {
         self.counts = [updated, self.entered.len() as u32];
     }
 
-    /// Records the frame `begin` started: the sun, the probes that came in
-    /// reset, this frame's rays (their hits cleared). `atmosphere` and
-    /// `sky_table` are the atmosphere's, `directional` the lights'
-    /// directional lights (none: no atmosphere, no sun).
+    /// Records the frame `begin` started: the probes that came in reset,
+    /// this frame's rays (their hits cleared).
     fn record(
         &mut self,
         device: &wgpu::Device,
         cmds: &mut helio_core::CommandRecorder<'_>,
-        atmosphere: Option<&wgpu::Buffer>,
-        sky_table: Option<&wgpu::Buffer>,
-        directional: Option<&wgpu::Buffer>,
     ) {
         let s = &self.state;
         self.cache.end_frame();
@@ -498,11 +480,7 @@ impl GiPass {
                     entry(2, &s.rays.rays),
                     entry(3, &s.rays.hits),
                     entry(4, &s.lists),
-                    entry(5, &s.sun),
-                    entry(6, directional.unwrap_or(&self.fallback_directional)),
-                    entry(7, atmosphere.unwrap_or(&self.fallback_atmosphere)),
-                    entry(8, sky_table.unwrap_or(&self.fallback_sky_table)),
-                    entry(9, &s.trace),
+                    entry(5, &s.trace),
                 ],
             },
         );
@@ -513,8 +491,6 @@ impl GiPass {
             timestamp_writes: None,
         });
         pass.set_bind_group(0, Some(&group), &[]);
-        pass.set_pipeline(&self.sun);
-        pass.dispatch_workgroups(1, 1, 1);
         if self.counts[1] > 0 {
             pass.set_pipeline(&self.reset);
             pass.dispatch_workgroups(self.counts[1].div_ceil(64), 1, 1);
@@ -542,19 +518,11 @@ impl RenderPass for GiPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &[
-            SKY_FRAME,
-            SKY_TABLE,
-            helio_core::resource_keys::RENDER_ENVIRONMENT,
-        ]
+        &[helio_core::resource_keys::RENDER_ENVIRONMENT]
     }
 
     fn writes(&self) -> &'static [&'static str] {
         self.writes
-    }
-
-    fn scene_buffers(&self) -> &'static [&'static str] {
-        &[helio_light_api::DIRECTIONAL_LIGHTS]
     }
 
     fn declare_resources(&self, _builder: &mut ResourceBuilder) {}
@@ -589,19 +557,8 @@ impl RenderPass for GiPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         self.answers.begin();
-        let [atmosphere, sky_table] = sky(ctx.registry).map(|b| b.cloned());
-        let directional = ctx
-            .scene_buffers
-            .get(helio_light_api::DIRECTIONAL_LIGHTS_ROW.key())
-            .map(|h| h.buffer.clone());
         let mut cmds = ctx.graphics_cmds();
-        self.record(
-            ctx.device,
-            &mut cmds,
-            atmosphere.as_ref(),
-            sky_table.as_ref(),
-            directional.as_ref(),
-        );
+        self.record(ctx.device, &mut cmds);
         Ok(())
     }
 
@@ -609,7 +566,6 @@ impl RenderPass for GiPass {
         let s = &self.state;
         frame.write_buffer_binding(GI_FRAME, &s.frame, "GI");
         frame.write_buffer_binding(GI_PROBES, &s.probes, "GI");
-        frame.write_buffer_binding(GI_SUN, &s.sun, "GI");
         frame.write_buffer_binding(GI_LISTS, &s.lists, "GI");
         frame.write_buffer_binding(GI_TRACE, &s.trace, "GI");
         frame.write_buffer_binding(GI_ANSWERED, &s.answered, "GI");
@@ -936,7 +892,7 @@ mod tests {
     }
 
     /// The shaders' copies of the layout constants (`gi_common.wgsl`,
-    /// `gi_rays.wgsl`, `gi_local_lights.wgsl`).
+    /// `gi_rays.wgsl`).
     #[test]
     fn shader_constants_match() {
         let source = GI_COMMON_SNIPPET.source;
@@ -954,15 +910,16 @@ mod tests {
                 "{name} is not {value} in gi_common.wgsl"
             );
         }
-        assert!(local_lights::SNIPPET.source.contains(&format!(
-            "const GI_MAX_LOCAL_LIGHTS: u32 = {}u;",
-            local_lights::MAX_LOCAL_LIGHTS
-        )));
         // `GiTrace` and `GiPending`: their fields, as the shaders read them.
-        let rays = GI_RAYS_SNIPPET.source;
+        // As written, whatever line endings the checkout gave the file.
+        let rays = GI_RAYS_SNIPPET.source.replace("\r\n", "\n");
         assert!(rays.contains("struct GiTrace {\n    eye: vec4<f32>,\n    info: vec4<u32>,\n}"));
-        assert_eq!(rays.matches("    sun: u32,\n    local: u32,\n    rest: u32,\n    t: f32,\n    sun_row: u32,\n    local_row: u32,\n").count(), 1);
-        assert_eq!(PENDING_BYTES, 6 * 4);
+        assert_eq!(
+            rays.matches("    light: u32,\n    rest: u32,\n    t: f32,\n    row: u32,\n")
+                .count(),
+            1
+        );
+        assert_eq!(PENDING_BYTES, 4 * 4);
         assert_eq!(TRACE_BYTES, 32);
     }
 
@@ -1007,8 +964,10 @@ mod tests {
         assert_eq!(shadow_stream().run, 1);
         let shadows = shadow_stream();
         assert_eq!(shadows.class, RayClass::Occlusion);
-        // A sun ray and a local light's a probe ray at most.
-        assert_eq!(shadows.capacity, 2 * MAX_RAYS);
+        // A shadow ray a probe ray at most, toward its light sample; a
+        // light query a probe ray at most.
+        assert_eq!(shadows.capacity, MAX_RAYS);
+        assert_eq!(light_batch().capacity, MAX_RAYS);
         assert_ne!(probes.rays, shadows.rays);
     }
 }
@@ -1039,24 +998,12 @@ mod shader_tests {
         validate(
             "gi_update",
             include_str!("../shaders/gi_update.wgsl"),
-            &[
-                SKY_SNIPPET,
-                SKY_TABLE_SNIPPET,
-                stream::SNIPPET,
-                GI_COMMON_SNIPPET,
-                GI_RAYS_SNIPPET,
-                helio_light_api::LIGHT_LIST_SNIPPET,
-            ],
+            &UPDATE_SNIPPETS,
         );
         validate(
             "gi_light",
             include_str!("../shaders/gi_light.wgsl"),
             &light::SNIPPETS,
-        );
-        validate(
-            "gi_gather_lights",
-            include_str!("../shaders/gi_gather_lights.wgsl"),
-            &local_lights::GATHER_SNIPPETS,
         );
         validate(
             "gi_integrate",
