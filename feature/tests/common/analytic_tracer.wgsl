@@ -1,4 +1,6 @@
 //!use frame_ray_stream
+//!use frame_ray_surface
+//!use frame_surface
 // A ray tracer of analytic shapes (the GI tests' stand-in for a kind): a
 // nearest-hit stream's rows get the nearest of what they hold and these
 // shapes' hit, with its surface; an occlusion stream's what the shapes let
@@ -119,5 +121,6 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
     let s = shapes[at];
     hits[id.x] = scene_nearest(tracer.info.x, best.t, best.inside, at, 0u, 0u);
     let transmission = select(0.0, s.b.w, u32(s.a.w) == 2u);
-    surfaces[id.x] = scene_surface(best.n, best.n, s.base.rgb, 0.0, 1.0, transmission, s.emissive.rgb);
+    let surface = surface_data(s.base.rgb, best.n, 1.0, 0.0, s.emissive.rgb);
+    surfaces[id.x] = scene_surface_pack(surface_with_transmission(surface, s.base.rgb * transmission), best.n);
 }

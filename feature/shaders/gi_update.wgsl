@@ -70,6 +70,6 @@ fn gi_rays_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let probe = gi_probe_position(index) + gi_trace.eye.xyz;
     let dir = gi_ray_dir(id.x % GI_RAYS, frame_gi.rotation);
     let behind = gi_ray_offset(probe);
-    probe_rays[id.x] = SceneRay(probe - dir * behind, GI_RAY_REACH, dir, scene_ray_cone(0.0, GI_RAY_SPREAD, RAY_MASK_ALL));
+    probe_rays[id.x] = SceneRay(probe - dir * behind, GI_RAY_REACH, dir, scene_cone_in_space(scene_ray_cone(0.0, GI_RAY_SPREAD, RAY_MASK_ALL), gi_trace.info.y));
     probe_hits[id.x] = SceneHit(0.0, 0u, 0u, 0u);
 }

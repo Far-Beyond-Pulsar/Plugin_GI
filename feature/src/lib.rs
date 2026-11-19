@@ -30,7 +30,7 @@ use helio_frame_api::lighting::sky::{
 use helio_frame_api::lighting::{
     VIEW_REMAPS, VIEW_REMAPS_BYTES, VIEW_REMAP_SPACES, VIEW_REMAP_SPACES_BYTES,
 };
-use helio_frame_api::rays::stream::{self, RayClass, Stream, StreamBuffers};
+use helio_frame_api::rays::stream::{self, RayClass, Stream, StreamBuffers, SurfaceDetail};
 use std::collections::VecDeque;
 
 mod feature;
@@ -53,7 +53,7 @@ pub use helio_gi_api::{
 /// update-list order): the nearest hit and its surface. Not runs: each ray
 /// starts behind its probe along its own direction (`gi_update.wgsl`).
 pub fn probe_stream() -> Stream {
-    Stream::new("gi_probe", RayClass::Nearest, MAX_RAYS)
+    Stream::new("gi_probe", RayClass::Nearest, MAX_RAYS).with_detail(SurfaceDetail::Diffuse)
 }
 
 /// The shadow rays of the probe rays' hits, toward the sun and one local
@@ -420,14 +420,16 @@ impl GiPass {
     }
 
     /// Starts frame `frame` with the eye at world point `eye`, at frame
-    /// point `frame_eye` (the frame's space is the rays'); without an
-    /// atmosphere the sky's radiance is `sky` above the horizon and `ground`
-    /// below it.
+    /// point `frame_eye` (the frame's space is the rays'), the probes' rays
+    /// in coordinate space `space` (`SceneRay::space`: the camera's, as the
+    /// probes light what it sees); without an atmosphere the sky's radiance
+    /// is `sky` above the horizon and `ground` below it.
     fn begin(
         &mut self,
         queue: &wgpu::Queue,
         eye: DVec3,
         frame_eye: Vec3,
+        space: u32,
         frame: u64,
         [sky, ground]: [Vec3; 2],
     ) {
@@ -451,7 +453,7 @@ impl GiPass {
         };
         let trace = GpuTrace {
             eye: frame_eye.extend(0.0).to_array(),
-            info: [(frame as u32).wrapping_mul(0x9e37_79b9), 0, 0, 0],
+            info: [(frame as u32).wrapping_mul(0x9e37_79b9), space, 0, 0],
         };
         let write = |buffer: &wgpu::Buffer, offset: u64, bytes: &[u8]| {
             helio_core::upload::write_buffer(queue, buffer, offset, bytes);
@@ -578,6 +580,7 @@ impl RenderPass for GiPass {
             ctx.queue,
             eye(ctx),
             frame_eye,
+            ctx.camera_data.view_info[3],
             ctx.frame_num,
             [sky, sky * 0.15],
         );

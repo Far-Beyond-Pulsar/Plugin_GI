@@ -1,6 +1,8 @@
 //!use frame_sky
 //!use sky_table
 //!use frame_ray_stream
+//!use frame_ray_surface
+//!use frame_surface
 //!use gi_common
 //!use gi_sample
 //!use gi_rays
@@ -86,7 +88,9 @@ fn gi_light(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     var cone = scene_ray_cone(0.0, 0.0, RAY_MASK_ALL);
     var pending = GiPending(0u, 0u, 0u, 0.0, GI_NO_ROW, GI_NO_ROW);
     var rest = vec3<f32>(0.0);
-    var sun_ray = SceneRay(vec3<f32>(0.0), 0.0, vec3<f32>(0.0, 1.0, 0.0), cone);
+    // Every shadow ray in the probes' coordinate space (`GiTrace`).
+    let space = gi_trace.info.y;
+    var sun_ray = SceneRay(vec3<f32>(0.0), 0.0, vec3<f32>(0.0, 1.0, 0.0), scene_cone_in_space(cone, space));
     var local_ray = sun_ray;
     var want_sun = false;
     var want_local = false;
@@ -100,11 +104,17 @@ fn gi_light(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
             pending.t = -max(t, 1e-3);
         } else {
             pending.t = t;
-            let s = probe_surfaces[i];
-            let n = scene_unpack_unit(s.normal);
-            let face = scene_unpack_unit(s.face);
-            let base = scene_surface_base_color(s);
-            let through = scene_surface_transmission(s);
+            // The hit's surface: the frame's `SurfaceData`, as a G-buffer
+            // texel holds it, and the face it was met on. The probe stream
+            // asks for `SurfaceDetail::Diffuse`: lit as Lambertian here.
+            let row = probe_surfaces[i];
+            let s = scene_surface_unpack(row);
+            let n = s.normal;
+            let face = scene_surface_face(row);
+            let base = s.albedo.rgb;
+            // The share of the light behind it that passes through, by
+            // colour (two-sided leaves).
+            let through = surface_transmission(s);
             // Eye-relative, as the probes are; and in the frame.
             let at = probe + dir * t;
             let p = at + eye;
@@ -115,9 +125,9 @@ fn gi_light(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
             cone = scene_ray_cone(GI_RAY_SPREAD * t, 0.0, RAY_MASK_ALL);
             // Lambertian on the side the ray meets, plus the surface's
             // share of its far side's light.
-            rest = base * gi_irradiance(at, n).rgb + scene_unpack_radiance(s.emissive);
-            if through > 0.0 {
-                rest += base * through * gi_irradiance(at, -n).rgb;
+            rest = base * gi_irradiance(at, n).rgb + s.emissive;
+            if any(through > vec3<f32>(0.0)) {
+                rest += through * gi_irradiance(at, -n).rgb;
             }
             // The sun, from the side of the surface that faces it.
             let sun = gi_sun[1].rgb * sun_transmittance_at(at);
@@ -127,21 +137,21 @@ fn gi_light(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
             var side = face;
             if cosine > 0.0 {
                 sun_light = base * sun * cosine / PI;
-            } else if through > 0.0 && cosine < 0.0 {
-                sun_light = base * through * sun * -cosine / PI;
+            } else if any(through > vec3<f32>(0.0)) && cosine < 0.0 {
+                sun_light = through * sun * -cosine / PI;
                 side = -face;
             }
             if any(sun_light > vec3<f32>(0.0)) {
                 want_sun = true;
                 pending.sun = scene_pack_radiance(sun_light);
-                sun_ray = SceneRay(p + side * off, GI_RAY_REACH, towards, cone);
+                sun_ray = SceneRay(p + side * off, GI_RAY_REACH, towards, scene_cone_in_space(cone, space));
             }
             if local_lights.count.x > 0u {
                 let pick = gi_local_light(p, n, gi_hash(i ^ gi_trace.info.x));
                 if any(pick.irradiance > vec3<f32>(0.0)) {
                     want_local = true;
                     pending.local = scene_pack_radiance(base / PI * pick.irradiance);
-                    local_ray = SceneRay(p + face * off, max(pick.distance - 2.0 * off, 1e-4), pick.dir, cone);
+                    local_ray = SceneRay(p + face * off, max(pick.distance - 2.0 * off, 1e-4), pick.dir, scene_cone_in_space(cone, space));
                 }
             }
         }

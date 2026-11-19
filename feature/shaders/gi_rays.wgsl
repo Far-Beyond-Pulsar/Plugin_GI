@@ -15,7 +15,10 @@ const GI_RAY_REACH: f32 = 1e9;
 const GI_NO_ROW: u32 = 0xffffffffu;
 
 // The frame's rays (`GiTrace`, `helio-pass-gi`): the eye in the frame's space
-// (rays are in frame space, the probes eye-relative); x the frame's seed.
+// (rays are in frame space, the probes eye-relative); x the frame's seed, y
+// the coordinate space every probe ray and shadow ray travels in
+// (`SceneRay::space`: the camera's `view_info.w`, as the probes light what it
+// sees).
 struct GiTrace {
     eye: vec4<f32>,
     info: vec4<u32>,

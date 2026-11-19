@@ -265,7 +265,11 @@ impl AnalyticPass {
             device,
             "analytic tracer",
             include_str!("analytic_tracer.wgsl"),
-            &[stream::SNIPPET],
+            &[
+                stream::SNIPPET,
+                stream::SURFACE_SNIPPET,
+                helio_frame_api::gbuffer::SURFACE_SNIPPET,
+            ],
         );
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("analytic tracer"),
