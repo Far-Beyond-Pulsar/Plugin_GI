@@ -9,10 +9,9 @@ enabled_by_default = true
 provides = [
     { id = "pulsar.gi.api", kind = "api", members = ["helio-gi-api"], version = 1 },
 ]
-requires = [
-    { id = "pulsar.lights.rows", optional = true },
-    { id = "pulsar.lights.api", optional = true },
-]
+# Nothing: lights reach it as the frame's light samples, geometry as the
+# frame's ray streams.
+requires = []
 
 # The plugin's root crate (the package in this directory): the one place it
 # registers everything it contributes. A game links it without its `editor`

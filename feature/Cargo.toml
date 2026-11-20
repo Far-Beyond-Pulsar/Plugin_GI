@@ -6,7 +6,6 @@ description = "Helio world-space diffuse global illumination: a probe clipmap tr
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-helio-light-api = { workspace = true }
 helio-frame-api = { workspace = true }
 helio-core = { workspace = true }
 helio-feature-api = { workspace = true }
@@ -19,6 +18,10 @@ log = { workspace = true }
 
 [dev-dependencies]
 pollster = "=0.4.0"
+# The tests light GI's hits through the lights' sampler (a kind's sampler
+# offered through the frame's light samples), from light rows.
+helio-light-api = { workspace = true }
+helio-pass-light-sampler = { workspace = true }
 # The probe tests trace GI's streams with an analytic tracer of their own
 # (no kind). The graph tests: mesh and virtual-geometry scenes over Helio's
 # presets plus this feature, traced by the meshes' tracer

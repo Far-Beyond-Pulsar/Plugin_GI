@@ -1,7 +1,8 @@
 //! What the GI tests share: GI's node built into a graph of its own with an
-//! analytic tracer offered through the frame's ray streams (no kind), a
-//! scene of a camera and light rows, buffer readback and the probes' records
-//! read back on the CPU.
+//! analytic tracer offered through the frame's ray streams (no kind) and the
+//! lights' sampler through the frame's light samples, a scene of a camera
+//! and light rows, buffer readback and the probes' records read back on the
+//! CPU.
 #![allow(dead_code)]
 
 use std::sync::{Arc, Mutex};
@@ -13,6 +14,7 @@ use helio_core::{
     Result as HelioResult, SceneBufferProjection, SceneInput,
 };
 use helio_feature_api::{BuildEnv, FeatureSet, FrameDesc, NodeBuild, NodeRegistry};
+use helio_frame_api::rays::light_samples;
 use helio_frame_api::rays::stream::{self, RayClass, Stream, Tracer, TracerId};
 use helio_pass_gi::{GiFeature, GiSettings, GI_FRAME, GI_PROBES, PROBE_WORDS};
 
@@ -265,7 +267,11 @@ impl AnalyticPass {
             device,
             "analytic tracer",
             include_str!("analytic_tracer.wgsl"),
-            &[stream::SNIPPET],
+            &[
+                stream::SNIPPET,
+                stream::SURFACE_SNIPPET,
+                helio_frame_api::gbuffer::SURFACE_SNIPPET,
+            ],
         );
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("analytic tracer"),
@@ -611,6 +617,8 @@ pub fn build(
     if let Some(late) = &setup.late {
         stream::offer(&mut env, late_tracer(late.clone()));
     }
+    // The lights' answer to GI's light batch (its sun and point lights).
+    light_samples::offer(&mut env, helio_pass_light_sampler::sampler());
     let mut registry = NodeRegistry::new();
     FeatureSet::new()
         .with(GiFeature)
@@ -683,14 +691,17 @@ impl Harness {
         graph.lock(16, 16);
         let mut camera_data = GpuCameraUniforms::zeroed();
         camera_data.position_near = [setup.eye.x, setup.eye.y, setup.eye.z, 0.1];
-        let mut directional = helio_light_api::DirectionalLights::default();
+        // The sun shines straight down: a directional light row among the
+        // point lights.
+        let mut lights = setup.lights.clone();
         if let Some(e) = setup.sun {
-            directional.lights[0] = helio_light_api::DirectionalLight {
-                toward: [0.0, 1.0, 0.0, 1.0],
-                radiance: [e, e, e, 0.0],
-                disk: [0.0; 4],
-            };
-            directional.count[0] = 1;
+            lights.push(helio_light_api::GpuLight {
+                direction_outer: [0.0, -1.0, 0.0, 0.0],
+                color_intensity: [1.0, 1.0, 1.0, e],
+                shadow_index: u32::MAX,
+                light_type: 0,
+                ..Default::default()
+            });
         }
         let handle = |buffer: wgpu::Buffer, row_bytes: u64| BufferHandle {
             buffer,
@@ -698,18 +709,12 @@ impl Harness {
             row_bytes,
             content_generation: 1,
         };
-        let mut handles = vec![(
-            helio_light_api::DIRECTIONAL_LIGHTS_ROW.key(),
-            handle(
-                storage_init(gpu, "test sun", bytemuck::bytes_of(&directional)),
-                std::mem::size_of::<helio_light_api::DirectionalLights>() as u64,
-            ),
-        )];
-        if !setup.lights.is_empty() {
+        let mut handles = Vec::new();
+        if !lights.is_empty() {
             handles.push((
                 helio_light_api::SCENE_LIGHTS.key(),
                 handle(
-                    storage_init(gpu, "test lights", bytemuck::cast_slice(&setup.lights)),
+                    storage_init(gpu, "test lights", bytemuck::cast_slice(&lights)),
                     std::mem::size_of::<helio_light_api::GpuLight>() as u64,
                 ),
             ));

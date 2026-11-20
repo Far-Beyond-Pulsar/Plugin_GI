@@ -3,9 +3,9 @@
 //!use gi_rays
 // This frame's probe rays into their probes (README.md, "The frame"), once
 // the shadow stream's tracers answered: a workgroup a probe, a lane a ray.
-// A ray's radiance is what `gi_light` left it (`gi_pending`): the rest of its
-// light, plus the sun's and the local light's, each times what its shadow
-// ray let through; nothing from an inside. Projected on L1 harmonics and
+// A ray's radiance is what `gi_light` and `gi_shadow` left it (`gi_pending`):
+// the rest of its light, plus its light sample's times what its shadow ray
+// let through; nothing from an inside. Projected on L1 harmonics and
 // blended into the probe; its distances into the probe's moments (a lane a
 // texel). A probe whose rays mostly meet insides is inside the ground (or a
 // wall). On a frame where no probe ray met anything the probes hold.
@@ -51,11 +51,8 @@ fn gi_integrate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_
     } else {
         if pending.t > 0.0 { t = min(pending.t, far); }
         radiance = scene_unpack_radiance(pending.rest);
-        if pending.sun_row != GI_NO_ROW {
-            radiance += scene_unpack_radiance(pending.sun) * scene_occlusion_through(shadow_hits[pending.sun_row]);
-        }
-        if pending.local_row != GI_NO_ROW {
-            radiance += scene_unpack_radiance(pending.local) * scene_occlusion_through(shadow_hits[pending.local_row]);
+        if pending.row != GI_NO_ROW {
+            radiance += scene_unpack_radiance(pending.light) * scene_occlusion_through(shadow_hits[pending.row]);
         }
     }
     // Fireflies: a ray meeting a surface a few centimetres from a point

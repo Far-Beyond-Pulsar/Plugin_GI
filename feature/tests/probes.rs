@@ -40,8 +40,9 @@ fn with_nothing_to_trace_gi_builds_nothing() {
 }
 
 /// The node is the probe stream's generator, its tracers, the hits' light
-/// (the shadow stream's generator), its tracers and the integration, in
-/// that order.
+/// (the light batch's generator), the light samplers (the lights': the grid
+/// built once, then the batch), the shadow stream's generator, its tracers
+/// and the integration, in that order.
 #[test]
 fn the_node_traces_both_streams_between_its_passes() {
     let Some(h) = harness(Setup::default(), Vec::new()) else {
@@ -53,6 +54,9 @@ fn the_node_traces_both_streams_between_its_passes() {
             "GI",
             "AnalyticTracer",
             "GILight",
+            "LightSampleGrid",
+            "LightSamples",
+            "GIShadow",
             "AnalyticTracer",
             "GIIntegrate",
             "Capture"

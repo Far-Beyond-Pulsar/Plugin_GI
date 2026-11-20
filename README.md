@@ -31,7 +31,7 @@ draw phases and api crates.
 - **Requires**: nothing. A project enables or disables the plugin in its
   `Pulsar.toml` (`[plugins]`); disabled, the kind is absent and the frame
   draws without it.
-- **Reads other kinds through**: `helio-light-api` (lights: the sun, and the point and spot lights its hits sample). Geometry of every kind reaches it only through Helio's ray streams (`helio_frame_api::rays::stream`): each kind's tracer answers GI's rays, and GI names none.
+- **Reads other kinds through**: nothing. Lights reach it only through Helio's light samples (`helio_frame_api::rays::light_samples`): each kind of light's sampler answers GI's light queries (the lights' sampler, the sun among its lights). Geometry of every kind reaches it only through Helio's ray streams (`helio_frame_api::rays::stream`): each kind's tracer answers GI's rays, and GI names none.
 - **Its standalone hosts also compose**: `helio-light-api, helio-light-host` (lights); `helio-mats` (materials); `helio-mesh-api, helio-mesh-host, helio-pass-forward-lit, helio-vg-stream` (meshes); `helio-pass-sky` (sky) (demos and GPU tests
   draw a whole scene; the plugin itself does not depend on these).
 

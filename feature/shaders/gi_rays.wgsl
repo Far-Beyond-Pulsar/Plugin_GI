@@ -15,26 +15,28 @@ const GI_RAY_REACH: f32 = 1e9;
 const GI_NO_ROW: u32 = 0xffffffffu;
 
 // The frame's rays (`GiTrace`, `helio-pass-gi`): the eye in the frame's space
-// (rays are in frame space, the probes eye-relative); x the frame's seed.
+// (rays are in frame space, the probes eye-relative); x the frame's seed, y
+// the coordinate space every probe ray and shadow ray travels in
+// (`SceneRay::space`: the camera's `view_info.w`, as the probes light what it
+// sees).
 struct GiTrace {
     eye: vec4<f32>,
     info: vec4<u32>,
 }
 
 // What lighting a probe ray's hit leaves for its integration (`gi_pending`,
-// a row a ray): the sun's light off the hit and the chosen local light's
-// (`scene_pack_radiance`), each waiting on its shadow ray's row of the
-// shadow stream (GI_NO_ROW: none); the rest of its light (its irradiance
-// from the probes, through it from its far side, what it emits; the sky on
-// a miss); and the ray's distance from its probe: above 0 a hit, 0 a miss,
-// below 0 a hit on an inside at minus that.
+// a row a ray): the light of the hit's light sample (`scene_pack_radiance`:
+// the light the frame's samplers chose for it, off the surface), waiting on
+// `row` (`gi_light`: the hit's row of the light batch; once `gi_shadow` ran,
+// its shadow ray's row of the shadow stream; GI_NO_ROW: none); the rest of
+// its light (its irradiance from the probes, through it from its far side,
+// what it emits; the sky on a miss); and the ray's distance from its probe:
+// above 0 a hit, 0 a miss, below 0 a hit on an inside at minus that.
 struct GiPending {
-    sun: u32,
-    local: u32,
+    light: u32,
     rest: u32,
     t: f32,
-    sun_row: u32,
-    local_row: u32,
+    row: u32,
 }
 
 // How far a ray leaving frame point `p` starts off its surface: a few ulps

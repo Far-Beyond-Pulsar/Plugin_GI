@@ -45,11 +45,9 @@ pub const MAX_RAYS: u32 = MAX_UPDATES * RAYS;
 pub const PROBE_WORDS: u32 = 72;
 
 /// Graph keys of what the passes publish: the frame's [`GpuFrame`] and the
-/// probes' records (what `gi_sample` reads), and the sun the probes' hits
-/// are lit by (`array<vec4<f32>, 2>`: towards it, its illuminance).
+/// probes' records (what `gi_sample` reads).
 pub const GI_FRAME: &str = "gi_frame";
 pub const GI_PROBES: &str = "gi_probes";
-pub const GI_SUN: &str = "gi_sun";
 /// The probes' irradiance at each pixel: the frame's indirect diffuse.
 pub const GI_IRRADIANCE: &str = helio_frame_api::lighting::INDIRECT_DIFFUSE;
 /// Debug mode of the probes' view (`GiResolvePass`; deferred lighting shows

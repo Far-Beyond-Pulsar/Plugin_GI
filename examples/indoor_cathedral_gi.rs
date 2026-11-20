@@ -156,6 +156,15 @@ struct AppState {
     chandelier_light_ids: Vec<Entity>,
     candle_light_ids: Vec<Entity>,
     start_time: std::time::Instant,
+    /// `HELIO_STILL=1`: the lights hold still (no flicker; their rows are
+    /// still written every frame, unchanged). `HELIO_STILL=2`: and their
+    /// rows stop being written after 60 frames, so the scene's buffers hold
+    /// and a reference path tracer's sum keeps accumulating. (With nothing
+    /// written, the meshes' occlusion culling keeps the pews, altar and
+    /// chandeliers culled: an open fault of the Hi-Z history, rendering.md
+    /// section 4, so compare the real-time image of a `1` run.)
+    still: u32,
+    lights_written: u32,
     /// The scene's meshes for ray queries (the GI probes trace them).
     rays: SceneRays,
     capture: SurfaceCapture,
@@ -637,6 +646,11 @@ impl ApplicationHandler for App {
             chandelier_light_ids,
             candle_light_ids,
             start_time: std::time::Instant::now(),
+            still: std::env::var("HELIO_STILL")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            lights_written: 0,
             rays,
             capture,
         });
@@ -869,13 +883,21 @@ impl AppState {
             }
         }
 
-        // Chandeliers flicker slightly
+        // Chandeliers flicker slightly (not while held still).
+        let time = if self.still > 0 { 0.0 } else { time };
+        let write_lights = self.still < 2 || self.lights_written < 60;
+        self.lights_written += 1;
         let flicker = 1.0 + (time * 9.1).sin() * 0.03 + (time * 5.7).cos() * 0.02;
         // Candle flicker — more pronounced
         let cflicker = 1.0 + (time * 14.3).sin() * 0.07 + (time * 8.9).cos() * 0.05;
 
         // Update flickering chandelier intensities
-        for (i, &id) in self.chandelier_light_ids.iter().enumerate() {
+        for (i, &id) in self
+            .chandelier_light_ids
+            .iter()
+            .enumerate()
+            .filter(|_| write_lights)
+        {
             let z = CHANDELIER_Z[i];
             update_light(
                 &mut self.scene_db.world,
@@ -884,7 +906,12 @@ impl AppState {
             );
         }
         // Update flickering candle intensities
-        for (i, &id) in self.candle_light_ids.iter().enumerate() {
+        for (i, &id) in self
+            .candle_light_ids
+            .iter()
+            .enumerate()
+            .filter(|_| write_lights)
+        {
             let (x, y, z) = CANDLES[i];
             update_light(
                 &mut self.scene_db.world,
@@ -904,6 +931,20 @@ impl AppState {
         self.rays.publish(&self.scene_db.world, &mut renderer);
 
         if std::env::var_os("HELIO_CAPTURE").is_some() {
+            // `HELIO_REFERENCE_DUMP=<prefix>`: the real-time scene colour
+            // snapshotted the frame before the capture (the reference's view
+            // shown), and the reference's sums at the capture.
+            let dump = std::env::var("HELIO_REFERENCE_DUMP").ok();
+            if dump.is_some() && self.capture.upcoming() + 1 == self.capture.at() {
+                if let Some(display) =
+                    renderer.find_pass::<helio_pass_reference::ReferenceDisplay>()
+                {
+                    display.request_snapshot();
+                }
+            }
+            if let Some(prefix) = dump.filter(|_| self.capture.upcoming() == self.capture.at()) {
+                common::dump_reference(&renderer, &prefix);
+            }
             let output = match self.surface.get_current_texture() {
                 wgpu::CurrentSurfaceTexture::Success(texture)
                 | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
