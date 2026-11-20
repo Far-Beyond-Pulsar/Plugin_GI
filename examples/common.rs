@@ -603,36 +603,15 @@ pub fn dump_reference(renderer: &helio::Renderer, prefix: &str) {
         .find_pass::<helio_pass_reference::ReferenceDisplay>()
         .and_then(helio_pass_reference::ReferenceDisplay::image)
     else {
-        eprintln!("[reference] no reference image: show debug view 60 or 61");
+        eprintln!("[reference] no reference image: show debug view 62 or 63");
         return;
     };
-    let (device, queue) = (renderer.device(), renderer.queue());
-    let mut buffers = vec![
-        ("reference", image.image.clone()),
-        ("diffuse", image.diffuse.clone()),
-    ];
-    buffers.extend(image.snapshot.clone().map(|s| ("realtime", s)));
-    for (name, buffer) in buffers {
-        let staging = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Reference dump"),
-            size: buffer.size(),
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut encoder = device.create_command_encoder(&Default::default());
-        encoder.copy_buffer_to_buffer(&buffer, 0, &staging, 0, buffer.size());
-        queue.submit([encoder.finish()]);
-        staging
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, |r| r.unwrap());
-        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        let pixels = (image.size[0] * image.size[1]) as usize * 16;
-        let mut bytes = Vec::with_capacity(8 + pixels);
-        bytes.extend_from_slice(&image.size[0].to_le_bytes());
-        bytes.extend_from_slice(&image.size[1].to_le_bytes());
-        bytes.extend_from_slice(&staging.slice(..).get_mapped_range().unwrap()[..pixels]);
-        let path = format!("{prefix}_{name}.f32");
-        std::fs::write(&path, bytes).unwrap();
-        println!("[reference] {} frames -> {path}", image.frames);
+    match image.write(renderer.device(), renderer.queue(), prefix) {
+        Ok(paths) => {
+            for path in paths {
+                println!("[reference] {} frames -> {path}", image.frames);
+            }
+        }
+        Err(error) => eprintln!("[reference] dump failed: {error}"),
     }
 }
