@@ -1,24 +1,32 @@
 //! World-space diffuse global illumination (README.md): a camera-centred
-//! clipmap of irradiance probes, kept up to date by rays every kind's tracer
-//! answers, read by deferred lighting at every pixel.
+//! clipmap of irradiance probes and the frame's radiance cache, kept up to
+//! date by rays every kind's tracer answers, read by deferred lighting at
+//! every pixel.
 //!
 //! GI is a consumer of the frame's ray streams
-//! (`helio_frame_api::rays::stream`) and knows no kind. Each frame, after the
-//! G-buffer phase (the frame's geometry as it was drawn):
+//! (`helio_frame_api::rays::stream`) and knows no kind; it publishes the
+//! frame's radiance cache (`helio_frame_api::rays::radiance_cache`), where a
+//! surface is lit for indirect light once for every reader. Each frame,
+//! after the G-buffer phase (the frame's geometry as it was drawn):
 //!
-//! 1. [`GiPass`]: the probes that came into the clipmap reset, this
-//!    frame's probe rays into the probe stream ([`probe_stream`]).
-//! 2. The kinds' tracers answer it (`stream::trace`): each ray's nearest hit
-//!    and its surface.
-//! 3. [`GiLightPass`]: the light of every hit that waits on no shadow ray,
-//!    and a light query a hit into GI's light batch ([`light_batch`]).
-//! 4. The frame's light samplers answer it (`light_samples::sample`): one
-//!    light a hit, from every kind of light that registered a sampler (the
+//! 1. [`GiPass`]: the probes that came into the clipmap reset, this frame's
+//!    probe rays into GI's stream ([`gi_stream`]).
+//! 2. [`RadianceCache`]: the cells no reader marked lately evicted, this
+//!    frame's cells to light listed, their rays after the probes'.
+//! 3. The kinds' tracers answer the stream (`stream::trace`): each ray's
+//!    nearest hit and its surface.
+//! 4. [`GiLightPass`]: every hit's light from the cache (a probe's hit all of
+//!    it, a cache ray's hit its indirect part), marking its cell; a light
+//!    query at each cache ray's hit and at its cell into the cache's light
+//!    batch ([`light_batch`]).
+//! 5. The frame's light samplers answer it (`light_samples::sample`): one
+//!    light a query, from every kind of light that registered a sampler (the
 //!    sun among them).
-//! 5. [`GiShadowPass`]: each hit's light sample off its surface, waiting on
-//!    a shadow ray, and those rays into the shadow stream ([`shadow_stream`]).
-//! 6. The tracers answer that (what gets through each).
-//! 7. [`GiIntegratePass`]: the rays' radiance into their probes, this frame.
+//! 6. [`GiShadowPass`]: each cache ray's light samples, waiting on shadow
+//!    rays, into the shadow stream ([`shadow_stream`]).
+//! 7. The tracers answer that (what gets through each).
+//! 8. [`GiIntegratePass`]: the probes' rays' radiance into their probes.
+//! 9. [`RadianceCacheFold`]: the cache rays' light into their cells.
 //!
 //! GI reads no light kind's rows: lights reach it as light samples.
 //!
@@ -35,13 +43,16 @@ use helio_frame_api::lighting::{
     VIEW_REMAPS, VIEW_REMAPS_BYTES, VIEW_REMAP_SPACES, VIEW_REMAP_SPACES_BYTES,
 };
 use helio_frame_api::rays::light_samples::LightBatch;
+use helio_frame_api::rays::radiance_cache;
 use helio_frame_api::rays::stream::{self, RayClass, Stream, StreamBuffers, SurfaceDetail};
 use std::collections::VecDeque;
 
+pub mod cache;
 mod feature;
 mod integrate;
 mod light;
 pub mod settings;
+pub use cache::{CacheConfig, RadianceCache, RadianceCacheFold};
 pub use feature::GiFeature;
 pub use integrate::GiIntegratePass;
 pub use light::{GiLightPass, GiShadowPass};
@@ -50,28 +61,34 @@ pub use settings::{GiSettings, GI};
 pub use helio_gi_api::{
     eye, Clipmap, GpuFrame, GpuLevel, DEFAULT_FINEST_SPACING, FRAME_BYTES, GI_COMMON_SNIPPET,
     GI_FRAME, GI_IRRADIANCE, GI_PROBES, GI_PROBES_VIEW, GI_SAMPLE_SNIPPET, LEVELS, LEVEL_PROBES,
-    LEVEL_UPDATES, MAX_RAYS, MAX_UPDATES, PROBES, PROBE_WORDS, RAYS, SIDE,
+    LEVEL_UPDATES, MAX_RAYS, MAX_UPDATES, PROBES, PROBE_WORDS, RADIANCE_CACHE_VIEW, RAYS, SIDE,
 };
 
-/// The probes' rays (`SceneRay`, a row a ray, probe-major: 64 a probe in
-/// update-list order): the nearest hit and its surface. Not runs: each ray
-/// starts behind its probe along its own direction (`gi_update.wgsl`).
-pub fn probe_stream() -> Stream {
-    Stream::new("gi_probe", RayClass::Nearest, MAX_RAYS).with_detail(SurfaceDetail::Diffuse)
+/// GI's rays (`SceneRay`, a row a ray): the probes' first, probe-major (64 a
+/// probe in update-list order, `MAX_RAYS` at most), then the radiance
+/// cache's (`CacheConfig::rays` at most, `cache::RAYS_PER_CELL` a cell): the
+/// nearest hit and its surface, one stream so every tracer's fixed cost a
+/// stream (a dispatch a volume, a binned material pass a program) is paid
+/// once. Not runs: each probe ray starts behind its probe along its own
+/// direction (`gi_update.wgsl`), and a stream's runs are the whole stream's.
+pub fn gi_stream(config: &GiConfig) -> Stream {
+    Stream::new("gi", RayClass::Nearest, MAX_RAYS + config.cache.rays)
+        .with_detail(SurfaceDetail::Diffuse)
 }
 
-/// The shadow rays of the probe rays' hits, toward each hit's light sample:
-/// as many rows as there are such rays this frame, packed from 0 (the
-/// shadow pass writes the count on the GPU), at most one a probe ray.
-pub fn shadow_stream() -> Stream {
-    Stream::new("gi_shadow", RayClass::Occlusion, MAX_RAYS)
+/// The shadow rays of the cache rays: toward each cache ray's hit's light
+/// sample and its cell's, as many rows as there are such rays this frame,
+/// packed from 0 (the shadow pass writes the count on the GPU), at most two
+/// a cache ray.
+pub fn shadow_stream(cache: &CacheConfig) -> Stream {
+    Stream::new("radiance_cache_shadow", RayClass::Occlusion, 2 * cache.rays)
 }
 
-/// The probe rays' hits asking the frame's light samplers for one light
-/// each: as many queries as hits this frame, packed from 0 (the light pass
-/// writes the count on the GPU).
-pub fn light_batch() -> LightBatch {
-    LightBatch::new("gi_probe", MAX_RAYS)
+/// The cache rays asking the frame's light samplers for one light each at
+/// their hit and at their cell: as many queries as that this frame, packed
+/// from 0 (the light pass writes the count on the GPU).
+pub fn light_batch(cache: &CacheConfig) -> LightBatch {
+    LightBatch::new("radiance_cache", 2 * cache.rays)
 }
 
 /// GI's own graph keys between its passes: this frame's update and reset
@@ -93,6 +110,14 @@ struct GpuTrace {
 const TRACE_BYTES: u64 = std::mem::size_of::<GpuTrace>() as u64;
 /// Bytes of a `GiPending`.
 const PENDING_BYTES: u64 = 16;
+
+/// The snippets `gi_resolve.wgsl` is built with.
+const RESOLVE_SNIPPETS: [helio_core::shader::ShaderSnippet; 4] = [
+    stream::SNIPPET,
+    radiance_cache::SNIPPET,
+    GI_COMMON_SNIPPET,
+    GI_SAMPLE_SNIPPET,
+];
 
 /// The snippets `gi_update.wgsl` is built with.
 const UPDATE_SNIPPETS: [helio_core::shader::ShaderSnippet; 3] =
@@ -282,7 +307,7 @@ struct Probes {
 }
 
 impl Probes {
-    fn new(device: &wgpu::Device) -> Self {
+    fn new(device: &wgpu::Device, stream: &Stream) -> Self {
         let storage = wgpu::BufferUsages::STORAGE
             | wgpu::BufferUsages::COPY_DST
             | wgpu::BufferUsages::COPY_SRC;
@@ -303,32 +328,35 @@ impl Probes {
             ),
             trace: buffer(device, "GI trace", TRACE_BYTES, uniform),
             answered: buffer(device, "GI answered", 16, storage),
-            rays: StreamBuffers::new(device, &probe_stream()),
+            rays: StreamBuffers::new(device, stream),
             clipmap: None,
             schedule: Schedule::new(),
         }
     }
 }
 
-/// How a [`GiPass`] runs.
+/// How GI's passes run.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GiConfig {
     /// The finest level's probe spacing (metres; each coarser level's
     /// doubles): finer indoors, where rooms, pillars and furniture are a few
     /// metres apart, than over open ground.
     pub finest_spacing: f64,
+    /// The radiance cache's capacity and ray budget.
+    pub cache: CacheConfig,
 }
 
 impl Default for GiConfig {
     fn default() -> Self {
         Self {
             finest_spacing: DEFAULT_FINEST_SPACING,
+            cache: CacheConfig::default(),
         }
     }
 }
 
-/// The start of the probes' update (module docs): the probe stream's
-/// generator.
+/// The start of the probes' update (module docs): GI's stream's generator
+/// (its probe rays; the cache's follow).
 pub struct GiPass {
     config: GiConfig,
     stream: Stream,
@@ -351,8 +379,7 @@ pub struct GiPass {
 }
 
 impl GiPass {
-    /// The pass, its probe stream's answers `answers`
-    /// ([`stream::answers`]).
+    /// The pass, GI's stream's answers `answers` ([`stream::answers`]).
     pub fn new(
         device: &wgpu::Device,
         config: GiConfig,
@@ -378,12 +405,12 @@ impl GiPass {
         );
         let pipeline_layout = pipeline_layout(device, "GI update", &layout);
         let pipeline = |entry: &str| compute(device, &module, &pipeline_layout, entry, &[]);
-        let stream = probe_stream();
+        let stream = gi_stream(&config);
         Self {
             config,
             stream,
             answers,
-            state: Probes::new(device),
+            state: Probes::new(device, &stream),
             reset: pipeline("gi_reset"),
             rays: pipeline("gi_rays_main"),
             layout,
@@ -527,6 +554,10 @@ impl RenderPass for GiPass {
         let Some(previous) = previous.as_any_mut().downcast_mut::<Self>() else {
             return false;
         };
+        // The stream's rows are sized by the cache's budget.
+        if previous.stream.capacity != self.stream.capacity {
+            return false;
+        }
         std::mem::swap(&mut self.state, &mut previous.state);
         true
     }
@@ -570,7 +601,10 @@ impl RenderPass for GiPass {
 }
 
 /// The probes' irradiance at every pixel (module docs): after the
-/// integration, before deferred lighting.
+/// integration, before deferred lighting. Its debug views show the probes
+/// ([`GI_PROBES_VIEW`]) and the radiance cache's cells
+/// ([`RADIANCE_CACHE_VIEW`]: what a pixel-wide ray's read of the frame's
+/// cache finds at each pixel's surface).
 pub struct GiResolvePass {
     layout: wgpu::BindGroupLayout,
     pipeline: wgpu::ComputePipeline,
@@ -581,6 +615,8 @@ pub struct GiResolvePass {
     no_remaps: wgpu::Buffer,
     debug_mode: u32,
     view_written: Option<(u32, bool)>,
+    /// What it binds for the radiance cache where none is published.
+    no_cache: radiance_cache::StandIn,
     /// Its bind group, kept while it binds the same targets.
     cache: helio_core::gpu_cache::GpuCache,
 }
@@ -610,13 +646,16 @@ impl GiResolvePass {
                 texture(7),
                 uniform(8, VIEW_REMAPS_BYTES),
                 uniform(9, VIEW_REMAP_SPACES_BYTES),
+                uniform(10, radiance_cache::RadianceCacheFrame::BYTES),
+                storage(11, false),
+                storage(12, false),
             ],
         });
         let module = helio_core::shader::module_with(
             device,
             "GI resolve",
             helio_core::include_wgsl!("../shaders/gi_resolve.wgsl"),
-            &[GI_COMMON_SNIPPET, GI_SAMPLE_SNIPPET],
+            &RESOLVE_SNIPPETS,
         );
         let pipeline_layout = pipeline_layout(device, "GI resolve", &layout);
         let pipeline = compute(device, &module, &pipeline_layout, "gi_resolve", &[]);
@@ -640,6 +679,7 @@ impl GiResolvePass {
             no_remaps,
             debug_mode: 0,
             view_written: None,
+            no_cache: radiance_cache::stand_in(device),
             cache: helio_core::gpu_cache::GpuCache::new(),
         }
     }
@@ -668,9 +708,11 @@ impl GiResolvePass {
             depth,
             size,
             None,
+            None,
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn record_with_remaps(
         &mut self,
         device: &wgpu::Device,
@@ -681,6 +723,7 @@ impl GiResolvePass {
         depth: &wgpu::TextureView,
         size: [u32; 2],
         remaps: Option<(&wgpu::TextureView, &wgpu::Buffer, &wgpu::Buffer)>,
+        cache: Option<[&wgpu::Buffer; 3]>,
     ) {
         let size = [size[0].max(1), size[1].max(1)];
         if self.out.as_ref().is_none_or(|(_, s)| *s != size) {
@@ -706,6 +749,11 @@ impl GiResolvePass {
             self.view_written = Some(view);
         }
         let (surface, maps, spaces) = remaps.unwrap_or((normal, &self.no_remaps, &self.no_remaps));
+        let [cache_frame, slots, entries] = cache.unwrap_or([
+            &self.no_cache.frame,
+            &self.no_cache.slots,
+            &self.no_cache.entries,
+        ]);
         let Some((out, _)) = &self.out else { return };
         self.cache.end_frame();
         let group = self.cache.bind_group(
@@ -733,6 +781,9 @@ impl GiResolvePass {
                     },
                     entry(8, maps),
                     entry(9, spaces),
+                    entry(10, cache_frame),
+                    entry(11, slots),
+                    entry(12, entries),
                 ],
             },
         );
@@ -774,6 +825,13 @@ impl RenderPass for GiResolvePass {
         builder.read_optional(helio_frame_api::gbuffer::SURFACE);
         builder.read_optional(VIEW_REMAPS);
         builder.read_optional(VIEW_REMAP_SPACES);
+        for key in [
+            radiance_cache::FRAME,
+            radiance_cache::SLOTS,
+            radiance_cache::ENTRIES,
+        ] {
+            builder.read_optional(key);
+        }
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
@@ -798,6 +856,15 @@ impl RenderPass for GiResolvePass {
             .zip(ctx.registry.buffer_binding(VIEW_REMAPS))
             .zip(ctx.registry.buffer_binding(VIEW_REMAP_SPACES))
             .map(|((surface, maps), spaces)| (surface, maps, spaces));
+        let binding = |name: &str| ctx.registry.buffer_binding(name);
+        let cache = match (
+            binding(radiance_cache::FRAME),
+            binding(radiance_cache::SLOTS),
+            binding(radiance_cache::ENTRIES),
+        ) {
+            (Some(frame), Some(slots), Some(entries)) => Some([frame, slots, entries]),
+            _ => None,
+        };
         let mut cmds = ctx.graphics_cmds();
         self.record_with_remaps(
             ctx.device,
@@ -808,6 +875,7 @@ impl RenderPass for GiResolvePass {
             ctx.depth,
             [ctx.width, ctx.height],
             remaps,
+            cache,
         );
         Ok(())
     }
@@ -817,11 +885,18 @@ impl RenderPass for GiResolvePass {
     }
 
     fn debug_views(&self) -> &'static [helio_core::DebugViewDescriptor] {
-        static VIEWS: &[helio_core::DebugViewDescriptor] = &[helio_core::DebugViewDescriptor {
-            name: "GI Probes",
-            debug_mode: GI_PROBES_VIEW,
-            description: "Each pixel's nearest GI probe (finest level holding it): its irradiance, dark red inside the ground, dark purple not yet updated; its cell's edges darker",
-        }];
+        static VIEWS: &[helio_core::DebugViewDescriptor] = &[
+            helio_core::DebugViewDescriptor {
+                name: "GI Probes",
+                debug_mode: GI_PROBES_VIEW,
+                description: "Each pixel's nearest GI probe (finest level holding it): its irradiance, dark red inside the ground, dark purple not yet updated; its cell's edges darker",
+            },
+            helio_core::DebugViewDescriptor {
+                name: "Radiance Cache",
+                debug_mode: RADIANCE_CACHE_VIEW,
+                description: "The radiance cache's cell at each pixel's surface, as a pixel-wide ray would read it: its irradiance (direct and indirect) / pi, dark purple where no cell holds a value; its cell's edges darker",
+            },
+        ];
         VIEWS
     }
 
@@ -953,18 +1028,20 @@ mod tests {
 
     #[test]
     fn the_streams_hold_every_ray() {
-        let probes = probe_stream();
-        assert_eq!(probes.class, RayClass::Nearest);
-        assert_eq!(probes.capacity, MAX_RAYS);
-        assert_eq!(probes.run, 1);
-        assert_eq!(shadow_stream().run, 1);
-        let shadows = shadow_stream();
+        let config = GiConfig::default();
+        let rays = gi_stream(&config);
+        assert_eq!(rays.class, RayClass::Nearest);
+        // Every probe ray, then the cache's.
+        assert_eq!(rays.capacity, MAX_RAYS + config.cache.rays);
+        assert_eq!(rays.run, 1);
+        let shadows = shadow_stream(&config.cache);
+        assert_eq!(shadows.run, 1);
         assert_eq!(shadows.class, RayClass::Occlusion);
-        // A shadow ray a probe ray at most, toward its light sample; a
-        // light query a probe ray at most.
-        assert_eq!(shadows.capacity, MAX_RAYS);
-        assert_eq!(light_batch().capacity, MAX_RAYS);
-        assert_ne!(probes.rays, shadows.rays);
+        // Two shadow rays and two light queries a cache ray at most (its
+        // hit's and its cell's); none for a probe's.
+        assert_eq!(shadows.capacity, 2 * config.cache.rays);
+        assert_eq!(light_batch(&config.cache).capacity, 2 * config.cache.rays);
+        assert_ne!(rays.rays, shadows.rays);
     }
 }
 
@@ -992,6 +1069,11 @@ mod shader_tests {
     #[test]
     fn shaders_validate() {
         validate(
+            "gi_cache",
+            include_str!("../shaders/gi_cache.wgsl"),
+            &cache::SNIPPETS,
+        );
+        validate(
             "gi_update",
             include_str!("../shaders/gi_update.wgsl"),
             &UPDATE_SNIPPETS,
@@ -1009,7 +1091,7 @@ mod shader_tests {
         validate(
             "gi_resolve",
             include_str!("../shaders/gi_resolve.wgsl"),
-            &[GI_COMMON_SNIPPET, GI_SAMPLE_SNIPPET],
+            &RESOLVE_SNIPPETS,
         );
     }
 }

@@ -1,8 +1,9 @@
 //! What the GI tests share: GI's node built into a graph of its own with an
 //! analytic tracer offered through the frame's ray streams (no kind) and the
 //! lights' sampler through the frame's light samples, a scene of a camera
-//! and light rows, buffer readback and the probes' records read back on the
-//! CPU.
+//! and light rows, buffer readback, the probes' records read back on the
+//! CPU, and a reader of the frame's radiance cache (as any pass outside GI
+//! reads and marks it, `frame_radiance_cache`).
 #![allow(dead_code)]
 
 use std::sync::{Arc, Mutex};
@@ -15,6 +16,7 @@ use helio_core::{
 };
 use helio_feature_api::{BuildEnv, FeatureSet, FrameDesc, NodeBuild, NodeRegistry};
 use helio_frame_api::rays::light_samples;
+use helio_frame_api::rays::radiance_cache::{self, RadianceCacheEntry, RadianceCacheSlot};
 use helio_frame_api::rays::stream::{self, RayClass, Stream, Tracer, TracerId};
 use helio_pass_gi::{GiFeature, GiSettings, GI_FRAME, GI_PROBES, PROBE_WORDS};
 
@@ -111,7 +113,8 @@ pub fn point_light(at: Vec3, intensity: f32, range: f32) -> helio_light_api::Gpu
     }
 }
 
-/// A shape of the analytic tracer (`analytic_tracer.wgsl`), in world space.
+/// A shape of the analytic tracer (`analytic_tracer.wgsl`), in world space,
+/// authored in coordinate space slot `space` (0: the world's).
 #[derive(Clone, Copy, Debug)]
 pub struct Shape {
     pub kind: u32,
@@ -120,6 +123,7 @@ pub struct Shape {
     pub transmission: f32,
     pub base: Vec3,
     pub emissive: Vec3,
+    pub space: u32,
 }
 
 const GROUND: u32 = 0;
@@ -137,6 +141,7 @@ impl Shape {
             transmission: 0.0,
             base: Vec3::splat(base),
             emissive: Vec3::ZERO,
+            space: 0,
         }
     }
 
@@ -149,6 +154,7 @@ impl Shape {
             transmission: 0.0,
             base: Vec3::splat(base),
             emissive: Vec3::ZERO,
+            space: 0,
         }
     }
 
@@ -162,6 +168,7 @@ impl Shape {
             transmission,
             base: Vec3::splat(base),
             emissive: Vec3::ZERO,
+            space: 0,
         }
     }
 
@@ -174,11 +181,19 @@ impl Shape {
             transmission: 0.0,
             base: Vec3::splat(base),
             emissive: Vec3::ZERO,
+            space: 0,
         }
     }
 
     pub fn glowing(mut self, radiance: f32) -> Self {
         self.emissive = Vec3::splat(radiance);
+        self
+    }
+
+    /// The shape in coordinate space slot `slot`: only rays of that space
+    /// (or of every space) see it.
+    pub fn in_space(mut self, slot: u32) -> Self {
+        self.space = slot;
         self
     }
 
@@ -188,7 +203,7 @@ impl Shape {
         GpuShape {
             a: [lo.x, lo.y, lo.z, self.kind as f32],
             b: [hi.x, hi.y, hi.z, self.transmission],
-            base: self.base.extend(0.0).to_array(),
+            base: self.base.extend(self.space as f32).to_array(),
             emissive: self.emissive.extend(0.0).to_array(),
         }
     }
@@ -207,13 +222,15 @@ const MAX_SHAPES: u64 = 16;
 
 /// The scene the tracer traces: shapes the test may change between frames.
 pub type Shapes = Arc<Mutex<Vec<Shape>>>;
+/// The frame's origin (world), which the test may move between frames.
+pub type Origin = Arc<Mutex<DVec3>>;
 
 /// The analytic tracer's pass for one stream.
 struct AnalyticPass {
     stream: Stream,
     id: TracerId,
     shapes: Shapes,
-    origin: DVec3,
+    origin: Origin,
     layout: wgpu::BindGroupLayout,
     pipeline: wgpu::ComputePipeline,
     rows: wgpu::Buffer,
@@ -231,7 +248,7 @@ impl AnalyticPass {
         stream: Stream,
         id: TracerId,
         shapes: Shapes,
-        origin: DVec3,
+        origin: Origin,
     ) -> Self {
         let storage = |binding, read_only| wgpu::BindGroupLayoutEntry {
             binding,
@@ -327,12 +344,13 @@ impl RenderPass for AnalyticPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        let origin = *self.origin.lock().unwrap();
         let rows: Vec<GpuShape> = self
             .shapes
             .lock()
             .unwrap()
             .iter()
-            .map(|s| s.row(self.origin))
+            .map(|s| s.row(origin))
             .collect();
         self.count = rows.len() as u32;
         if !rows.is_empty() {
@@ -397,12 +415,18 @@ impl RenderPass for AnalyticPass {
 }
 
 /// The analytic tracer of `shapes` (world space, the frame at `origin`).
-pub fn analytic_tracer(shapes: Shapes, origin: DVec3) -> Tracer {
+pub fn analytic_tracer(shapes: Shapes, origin: Origin) -> Tracer {
     Tracer {
         name: "analytic",
         supported: Arc::new(|_| true),
         trace: Arc::new(move |build, stream, id| {
-            let pass = AnalyticPass::new(build.env.device, *stream, id, shapes.clone(), origin);
+            let pass = AnalyticPass::new(
+                build.env.device,
+                *stream,
+                id,
+                shapes.clone(),
+                origin.clone(),
+            );
             build.graph.add_pass(Box::new(pass));
             Ok(())
         }),
@@ -460,10 +484,12 @@ pub fn late_tracer(late: Arc<std::sync::atomic::AtomicBool>) -> Tracer {
     }
 }
 
-/// Keeps GI's frame and probes (`gi_frame`, `gi_probes`) as they are
-/// published, for the test to read.
+/// Keeps GI's frame and probes (`gi_frame`, `gi_probes`) and the radiance
+/// cache's frame, slots and entries as they are published, for the test to
+/// read.
 struct Capture {
     out: Arc<Mutex<Option<[wgpu::Buffer; 2]>>>,
+    cache: Arc<Mutex<Option<[wgpu::Buffer; 3]>>>,
 }
 
 impl RenderPass for Capture {
@@ -472,16 +498,273 @@ impl RenderPass for Capture {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &[GI_FRAME, GI_PROBES]
+        &[
+            GI_FRAME,
+            GI_PROBES,
+            radiance_cache::FRAME,
+            radiance_cache::SLOTS,
+            radiance_cache::ENTRIES,
+        ]
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        if let (Some(frame), Some(probes)) = (
-            ctx.registry.buffer_binding(GI_FRAME),
-            ctx.registry.buffer_binding(GI_PROBES),
-        ) {
-            *self.out.lock().unwrap() = Some([frame.clone(), probes.clone()]);
+        let binding = |name: &str| ctx.registry.buffer_binding(name).cloned();
+        if let (Some(frame), Some(probes)) = (binding(GI_FRAME), binding(GI_PROBES)) {
+            *self.out.lock().unwrap() = Some([frame, probes]);
         }
+        if let (Some(frame), Some(slots), Some(entries)) = (
+            binding(radiance_cache::FRAME),
+            binding(radiance_cache::SLOTS),
+            binding(radiance_cache::ENTRIES),
+        ) {
+            *self.cache.lock().unwrap() = Some([frame, slots, entries]);
+        }
+        Ok(())
+    }
+}
+
+/// A point a test reads the radiance cache at: a world point, the unit
+/// normal of the side it is seen from, the footprint of the ray that would
+/// read it and the ray's coordinate space (`SceneRay::space`).
+#[derive(Clone, Copy, Debug)]
+pub struct CacheQuery {
+    pub world: DVec3,
+    pub normal: Vec3,
+    pub footprint: f32,
+    pub space: u32,
+}
+
+/// What a read found: the irradiance from the lights and from everything
+/// else, the level it came from (`None`: nothing found), and the history of
+/// the query's own cell (direct, indirect; zero: no value or no cell).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CacheRead {
+    pub direct: Vec3,
+    pub indirect: Vec3,
+    pub level: Option<u32>,
+    pub history: [u32; 2],
+}
+
+impl CacheRead {
+    pub fn irradiance(&self) -> Vec3 {
+        self.direct + self.indirect
+    }
+}
+
+/// The reader's queries (and whether it marks them) for the next frames.
+pub type CacheQueries = Arc<Mutex<(Vec<CacheQuery>, bool)>>;
+
+const READER: &str = r#"//!use frame_ray_stream
+//!use frame_radiance_cache
+struct Query {
+    p: vec4<f32>,
+    n: vec4<f32>,
+}
+@group(0) @binding(0) var<uniform> radiance_cache_frame: RadianceCacheFrame;
+@group(0) @binding(1) var<storage, read_write> radiance_cache_slots: array<RadianceCacheSlot>;
+@group(0) @binding(2) var<storage, read_write> radiance_cache_entries: array<RadianceCacheEntry>;
+@group(0) @binding(3) var<storage, read> queries: array<Query>;
+@group(0) @binding(4) var<storage, read_write> out: array<vec4<f32>>;
+// x: queries, y: 1 to mark them.
+@group(0) @binding(5) var<uniform> info: vec4<u32>;
+
+@compute @workgroup_size(64)
+fn read_cache(@builtin(global_invocation_id) id: vec3<u32>) {
+    let i = id.x;
+    if i >= info.x { return; }
+    let q = queries[i];
+    let space = bitcast<u32>(q.n.w);
+    let e = radiance_cache_read(q.p.xyz, q.n.xyz, q.p.w, space, RADIANCE_CACHE_LEVELS);
+    var history = vec2<f32>(0.0);
+    let s = radiance_cache_find(radiance_cache_key(q.p.xyz, q.n.xyz, radiance_cache_level(q.p.xyz, q.p.w), space));
+    if s != RADIANCE_CACHE_NONE {
+        let h = radiance_cache_entries[s].history;
+        history = vec2<f32>(f32(h & 0xffu), f32((h >> 8u) & 0xffu));
+    }
+    out[i * 3u] = vec4<f32>(e.direct, select(-1.0, f32(e.level), e.found));
+    out[i * 3u + 1u] = vec4<f32>(e.indirect, 0.0);
+    out[i * 3u + 2u] = vec4<f32>(history, 0.0, 0.0);
+    if info.y != 0u { radiance_cache_mark(q.p.xyz, q.n.xyz, q.p.w, space); }
+}
+"#;
+
+/// A pass reading (and marking) the frame's radiance cache at the test's
+/// queries after GI's node, as a reader outside GI does.
+struct CacheReader {
+    queries: CacheQueries,
+    origin: Origin,
+    layout: wgpu::BindGroupLayout,
+    pipeline: wgpu::ComputePipeline,
+    input: wgpu::Buffer,
+    info: wgpu::Buffer,
+    out: wgpu::Buffer,
+    count: u32,
+}
+
+/// The most queries a test reads at once.
+pub const MAX_QUERIES: u64 = 8192;
+
+impl CacheReader {
+    fn new(device: &wgpu::Device, queries: CacheQueries, origin: Origin) -> Self {
+        let storage = |binding, read_only| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let uniform = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("cache reader"),
+            entries: &[
+                uniform(0),
+                storage(1, false),
+                storage(2, false),
+                storage(3, true),
+                storage(4, false),
+                uniform(5),
+            ],
+        });
+        let module = helio_core::shader::module_with(
+            device,
+            "cache reader",
+            READER,
+            &[stream::SNIPPET, radiance_cache::SNIPPET],
+        );
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("cache reader"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("cache reader"),
+            layout: Some(&pipeline_layout),
+            module: &module,
+            entry_point: Some("read_cache"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let buffer = |size, usage| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("cache reader"),
+                size,
+                usage: usage | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            })
+        };
+        Self {
+            queries,
+            origin,
+            layout,
+            pipeline,
+            input: buffer(MAX_QUERIES * 32, wgpu::BufferUsages::STORAGE),
+            info: buffer(16, wgpu::BufferUsages::UNIFORM),
+            out: buffer(MAX_QUERIES * 48, wgpu::BufferUsages::STORAGE),
+            count: 0,
+        }
+    }
+}
+
+impl RenderPass for CacheReader {
+    fn name(&self) -> &'static str {
+        "CacheReader"
+    }
+
+    fn reads(&self) -> &'static [&'static str] {
+        &[
+            radiance_cache::FRAME,
+            radiance_cache::SLOTS,
+            radiance_cache::ENTRIES,
+        ]
+    }
+
+    fn writes(&self) -> &'static [&'static str] {
+        &[radiance_cache::SLOTS, radiance_cache::ENTRIES]
+    }
+
+    fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        let origin = *self.origin.lock().unwrap();
+        let (queries, mark) = &*self.queries.lock().unwrap();
+        let rows: Vec<[f32; 8]> = queries
+            .iter()
+            .map(|q| {
+                let p = (q.world - origin).as_vec3();
+                [
+                    p.x,
+                    p.y,
+                    p.z,
+                    q.footprint,
+                    q.normal.x,
+                    q.normal.y,
+                    q.normal.z,
+                    f32::from_bits(q.space),
+                ]
+            })
+            .collect();
+        self.count = rows.len() as u32;
+        if !rows.is_empty() {
+            ctx.queue
+                .write_buffer(&self.input, 0, bytemuck::cast_slice(&rows));
+        }
+        ctx.queue.write_buffer(
+            &self.info,
+            0,
+            bytemuck::cast_slice(&[self.count, u32::from(*mark), 0, 0]),
+        );
+        Ok(())
+    }
+
+    fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        let binding = |name: &str| ctx.registry.buffer_binding(name);
+        let (Some(frame), Some(slots), Some(entries)) = (
+            binding(radiance_cache::FRAME),
+            binding(radiance_cache::SLOTS),
+            binding(radiance_cache::ENTRIES),
+        ) else {
+            return Ok(());
+        };
+        if self.count == 0 {
+            return Ok(());
+        }
+        fn entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
+            wgpu::BindGroupEntry {
+                binding,
+                resource: buffer.as_entire_binding(),
+            }
+        }
+        // A test: a bind group a frame is fine here.
+        let group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cache reader"),
+            layout: &self.layout,
+            entries: &[
+                entry(0, frame),
+                entry(1, slots),
+                entry(2, entries),
+                entry(3, &self.input),
+                entry(4, &self.out),
+                entry(5, &self.info),
+            ],
+        });
+        let mut cmds = ctx.graphics_cmds();
+        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("cache reader"),
+            timestamp_writes: None,
+        });
+        pass.set_bind_group(0, Some(&group), &[]);
+        pass.set_pipeline(&self.pipeline);
+        pass.dispatch_workgroups(self.count.div_ceil(64), 1, 1);
         Ok(())
     }
 }
@@ -505,6 +788,8 @@ pub struct Setup {
     /// An atmosphere whose sky is black (its frame and sky table published
     /// as the sky publishes them), over the flat sky.
     pub black_atmosphere: bool,
+    /// GI's settings.
+    pub gi: GiSettings,
 }
 
 impl Default for Setup {
@@ -518,6 +803,7 @@ impl Default for Setup {
             traced: true,
             late: None,
             black_atmosphere: false,
+            gi: GiSettings::default(),
         }
     }
 }
@@ -572,10 +858,15 @@ pub struct Harness {
     pub shapes: Shapes,
     pub graph: RenderGraph,
     pub stats: helio_core::FrameStats,
+    /// The radiance cache reader's queries.
+    pub queries: CacheQueries,
+    origin: Origin,
     scene: Scene,
     target: wgpu::TextureView,
     depth: wgpu::TextureView,
     captured: Arc<Mutex<Option<[wgpu::Buffer; 2]>>>,
+    cache: Arc<Mutex<Option<[wgpu::Buffer; 3]>>>,
+    reader_out: wgpu::Buffer,
     /// The atmosphere's frame and sky table, when the setup has one.
     atmosphere: Option<[wgpu::Buffer; 2]>,
 }
@@ -590,8 +881,8 @@ fn storage_init(gpu: &Gpu, label: &str, bytes: &[u8]) -> wgpu::Buffer {
         })
 }
 
-/// The passes GI's node (`helio.pass.gi`) builds for `setup`, by name; the
-/// graph and the environment it was built in.
+/// The graph of GI's node `kind` built for `setup`, and the frame's origin
+/// its tracer follows.
 pub fn build(
     gpu: &'static Gpu,
     setup: &Setup,
@@ -600,7 +891,8 @@ pub fn build(
     camera: &wgpu::Buffer,
     kind: &str,
     external: bool,
-) -> RenderGraph {
+) -> (RenderGraph, Origin) {
+    let origin: Origin = Arc::new(Mutex::new(setup.origin));
     let frame = FrameDesc {
         width: 16,
         height: 16,
@@ -610,9 +902,9 @@ pub fn build(
         xr: false,
     };
     let mut env = BuildEnv::new(&gpu.device, &gpu.queue, frame, camera, camera, stats, true)
-        .with_setting(GiSettings::default());
+        .with_setting(setup.gi);
     if setup.traced {
-        stream::offer(&mut env, analytic_tracer(shapes.clone(), setup.origin));
+        stream::offer(&mut env, analytic_tracer(shapes.clone(), origin.clone()));
     }
     if let Some(late) = &setup.late {
         stream::offer(&mut env, late_tracer(late.clone()));
@@ -640,7 +932,7 @@ pub fn build(
         node_id: "gi",
     })
     .expect("GI's node builds");
-    graph
+    (graph, origin)
 }
 
 /// The names of `graph`'s passes, in order.
@@ -675,7 +967,7 @@ impl Harness {
                 | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let mut graph = build(
+        let (mut graph, origin) = build(
             gpu,
             &setup,
             &shapes,
@@ -685,9 +977,15 @@ impl Harness {
             external,
         );
         let captured = Arc::new(Mutex::new(None));
+        let cache = Arc::new(Mutex::new(None));
         graph.add_pass(Box::new(Capture {
             out: captured.clone(),
+            cache: cache.clone(),
         }));
+        let queries: CacheQueries = Arc::new(Mutex::new((Vec::new(), false)));
+        let reader = CacheReader::new(&gpu.device, queries.clone(), origin.clone());
+        let reader_out = reader.out.clone();
+        graph.add_pass(Box::new(reader));
         graph.lock(16, 16);
         let mut camera_data = GpuCameraUniforms::zeroed();
         camera_data.position_near = [setup.eye.x, setup.eye.y, setup.eye.z, 0.1];
@@ -770,9 +1068,13 @@ impl Harness {
             shapes,
             graph,
             stats,
+            queries,
+            origin,
             target: texture(wgpu::TextureFormat::Rgba8Unorm, "test target"),
             depth: texture(wgpu::TextureFormat::Depth32Float, "test depth"),
             captured,
+            cache,
+            reader_out,
         }
     }
 
@@ -833,6 +1135,107 @@ impl Harness {
     pub fn probes(&self) -> Vec<u32> {
         let [_, probes] = self.buffers();
         read(&self.gpu.device, &self.gpu.queue, &probes)
+    }
+
+    /// Reads the cache at `queries` from the next frame on, marking them
+    /// if `mark`.
+    pub fn read_cache(&self, queries: Vec<CacheQuery>, mark: bool) {
+        assert!(queries.len() as u64 <= MAX_QUERIES);
+        *self.queries.lock().unwrap() = (queries, mark);
+    }
+
+    /// What the last frame's reads found, a query each.
+    pub fn cache_reads(&self) -> Vec<CacheRead> {
+        let count = self.queries.lock().unwrap().0.len();
+        let words = read(&self.gpu.device, &self.gpu.queue, &self.reader_out);
+        let f: &[f32] = bytemuck::cast_slice(&words);
+        (0..count)
+            .map(|i| {
+                let v = |k: usize| {
+                    Vec3::new(
+                        f[i * 12 + k * 4],
+                        f[i * 12 + k * 4 + 1],
+                        f[i * 12 + k * 4 + 2],
+                    )
+                };
+                let level = f[i * 12 + 3];
+                CacheRead {
+                    direct: v(0),
+                    indirect: v(1),
+                    level: (level >= 0.0).then_some(level as u32),
+                    history: [f[i * 12 + 8] as u32, f[i * 12 + 9] as u32],
+                }
+            })
+            .collect()
+    }
+
+    /// The cache's slots and entries as the last frame left them.
+    pub fn cache_rows(&self) -> (Vec<RadianceCacheSlot>, Vec<RadianceCacheEntry>) {
+        let [_, slots, entries] = self
+            .cache
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("GI published its radiance cache");
+        let slots = read(&self.gpu.device, &self.gpu.queue, &slots);
+        let entries = read(&self.gpu.device, &self.gpu.queue, &entries);
+        (
+            bytemuck::cast_slice(&slots).to_vec(),
+            bytemuck::cast_slice(&entries).to_vec(),
+        )
+    }
+
+    /// Moves the frame's origin to world point `origin`, the eye kept where
+    /// it is in the world (its place in the frame follows).
+    pub fn set_origin(&mut self, origin: DVec3) {
+        let eye = self.setup.world_eye();
+        self.setup.origin = origin;
+        self.setup.eye = (eye - origin).as_vec3();
+        *self.origin.lock().unwrap() = origin;
+        self.scene.origin = origin;
+        let e = self.setup.eye;
+        self.scene.camera_data.position_near = [e.x, e.y, e.z, 0.1];
+    }
+
+    /// Replaces the light rows (as many as before) from the next frame.
+    pub fn set_lights(&mut self, lights: &[helio_light_api::GpuLight]) {
+        let handles = vec![(
+            helio_light_api::SCENE_LIGHTS.key(),
+            BufferHandle {
+                buffer: storage_init(self.gpu, "test lights", bytemuck::cast_slice(lights)),
+                epoch: 0,
+                row_bytes: std::mem::size_of::<helio_light_api::GpuLight>() as u64,
+                content_generation: self.scene.frame + 2,
+            },
+        )];
+        self.scene.buffers = SceneBufferProjection::from_handles(handles);
+    }
+
+    /// Renders a frame and returns its statistics, its GPU counters read
+    /// back.
+    pub fn frame_stats(&mut self) -> Arc<helio_core::StatsSnapshot> {
+        let gpu = self.gpu;
+        let cycle = |stats: &helio_core::FrameStats| {
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            stats.cycle(&mut encoder);
+            gpu.queue.submit([encoder.finish()]);
+            stats.submitted();
+            gpu.device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .unwrap();
+        };
+        cycle(&self.stats);
+        self.frames(1);
+        for _ in 0..2 {
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            self.stats.cycle(&mut encoder);
+            gpu.queue.submit([encoder.finish()]);
+            self.stats.submitted();
+            gpu.device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .unwrap();
+        }
+        self.stats.latest()
     }
 
     /// The clipmap of the eye's place.

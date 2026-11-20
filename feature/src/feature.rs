@@ -1,14 +1,16 @@
 //! GI as a feature: the nodes it adds to preset graphs.
 //!
-//! The probes' update runs at [`Slot::Geometry`], after the G-buffer phase:
-//! every kind has drawn this frame's geometry there (a voxel terrain its cut
-//! for this eye, uploads and all), so the tracers its rays meet answer for
-//! the frame being drawn, and the probes take this frame's rays before the
-//! resolve reads them. Its node holds the whole update: the probe stream's
-//! generator, the stream's tracers (`stream::trace`), the hits' light and
-//! their light batch, the frame's light samplers (`light_samples::sample`),
-//! the shadow stream's generator, its tracers, the integration. GI reads no
-//! light kind: what lights its hits comes as light samples. The resolve
+//! The update runs at [`Slot::Geometry`], after the G-buffer phase: every
+//! kind has drawn this frame's geometry there (a voxel terrain its cut for
+//! this eye, uploads and all), so the tracers its rays meet answer for the
+//! frame being drawn, and the probes take this frame's rays before the
+//! resolve reads them. Its node holds the whole update: GI's stream's
+//! generators (the probes' rays, the radiance cache's), the stream's tracers
+//! (`stream::trace`), the hits' light from the cache and the cache rays'
+//! light batch, the frame's light samplers (`light_samples::sample`), the
+//! shadow stream's generator, its tracers, the probes' integration and the
+//! cache's fold. GI reads no light kind: what lights its cells comes as
+//! light samples. The resolve
 //! joins at [`Slot::LightingInputs`], publishing the frame's indirect
 //! diffuse. Where nothing traces rays (no kind registered a tracer this
 //! device runs), neither builds.
@@ -27,7 +29,10 @@ use helio_frame_api::lighting::{inputs_order, InputsOrder};
 use helio_frame_api::rays::{light_samples, stream};
 use helio_frame_api::{FrameNode, Slot};
 
-use crate::{GiIntegratePass, GiLightPass, GiPass, GiResolvePass, GiSettings, GiShadowPass};
+use crate::{
+    GiIntegratePass, GiLightPass, GiPass, GiResolvePass, GiSettings, GiShadowPass, RadianceCache,
+    RadianceCacheFold,
+};
 
 /// World-space diffuse GI ([`crate`]).
 pub struct GiFeature;
@@ -98,26 +103,46 @@ fn build_update(build: &mut NodeBuild<'_, '_>) -> Result<(), String> {
     let config = settings(build.env).config();
     let device = build.env.device.clone();
     let stats = build.env.stats.clone();
-    let (probes, shadows) = (crate::probe_stream(), crate::shadow_stream());
-    let answers = [probes, shadows].map(|s| stream::answers(build.env, &s));
+    let (rays, shadows) = (
+        crate::gi_stream(&config),
+        crate::shadow_stream(&config.cache),
+    );
+    let answers = [rays, shadows].map(|s| stream::answers(build.env, &s));
     build.graph.add_pass(Box::new(GiPass::new(
         &device,
         config,
         &stats,
         answers[0].clone(),
     )));
-    stream::trace(build, &probes)?;
-    build.graph.add_pass(Box::new(GiLightPass::new(&device)));
-    light_samples::sample(build, &crate::light_batch())?;
+    build.graph.add_pass(Box::new(RadianceCache::new(
+        &device,
+        config.cache,
+        &stats,
+        rays,
+    )));
+    stream::trace(build, &rays)?;
+    build
+        .graph
+        .add_pass(Box::new(GiLightPass::new(&device, &config)));
+    light_samples::sample(build, &crate::light_batch(&config.cache))?;
     build.graph.add_pass(Box::new(GiShadowPass::new(
         &device,
+        &config,
         &stats,
         answers[1].clone(),
     )));
     stream::trace(build, &shadows)?;
     build
         .graph
-        .add_pass(Box::new(GiIntegratePass::new(&device, answers)));
+        .add_pass(Box::new(GiIntegratePass::new(&device, answers[0].clone())));
+    build.graph.add_pass(Box::new(RadianceCacheFold::new(
+        &device,
+        config.cache,
+        &stats,
+        rays,
+        shadows,
+        answers,
+    )));
     Ok(())
 }
 
@@ -133,14 +158,16 @@ impl Feature for GiFeature {
         registrar.swappable::<GiShadowPass>();
         registrar.swappable::<GiIntegratePass>();
         registrar.swappable::<GiResolvePass>();
+        registrar.swappable::<RadianceCache>();
+        registrar.swappable::<RadianceCacheFold>();
         registrar.indirect_occlusion(Arc::new(occlusion_distance));
         registrar.node(
             node(
                 UPDATE,
                 "GI: Probe Update",
-                "Traces this frame's probe rays and their shadow rays through every kind's \
-                 tracer, lights the hits and integrates them into the probe clipmap. Builds \
-                 nothing where nothing traces rays.",
+                "Traces this frame's probe rays and the radiance cache's rays and shadow rays \
+                 through every kind's tracer, lights the hits from the cache, integrates the \
+                 probes and folds the cache's cells. Builds nothing where nothing traces rays.",
                 build_update,
             )
             .once_per_frame()

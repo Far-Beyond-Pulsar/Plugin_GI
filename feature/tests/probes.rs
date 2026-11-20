@@ -18,6 +18,26 @@ fn harness(setup: Setup, shapes: Vec<Shape>) -> Option<Harness> {
     Some(Harness::new(gpu()?, setup, shapes))
 }
 
+/// Renders frames until `done` holds for the probes' records, under a
+/// wall-clock guard: a probe whose hits the radiance cache cannot light yet
+/// holds its update (cells are lit from the frame after a hit first marks
+/// them), so a test waits for the probes it checks, not for a count of
+/// frames.
+fn frames_until(h: &mut Harness, what: &str, done: impl Fn(&[u32]) -> bool) -> Vec<u32> {
+    let start = std::time::Instant::now();
+    loop {
+        h.frames(1);
+        let words = h.probes();
+        if done(&words) {
+            return words;
+        }
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(300),
+            "{what}: not within the guard"
+        );
+    }
+}
+
 #[test]
 fn with_nothing_to_trace_gi_builds_nothing() {
     let Some(gpu) = gpu() else { return };
@@ -34,15 +54,16 @@ fn with_nothing_to_trace_gi_builds_nothing() {
         mapped_at_creation: false,
     });
     for kind in ["helio.pass.gi", "helio.pass.gi_resolve"] {
-        let graph = common::build(gpu, &setup, &shapes, &stats, &camera, kind, false);
+        let (graph, _) = common::build(gpu, &setup, &shapes, &stats, &camera, kind, false);
         assert_eq!(common::pass_names(&graph), Vec::<String>::new(), "{kind}");
     }
 }
 
-/// The node is the probe stream's generator, its tracers, the hits' light
-/// (the light batch's generator), the light samplers (the lights': the grid
-/// built once, then the batch), the shadow stream's generator, its tracers
-/// and the integration, in that order.
+/// The node is GI's stream's generators (the probes' rays, the radiance
+/// cache's), its tracers, the hits' light (the cache's light batch's
+/// generator), the light samplers (the lights': the grid built once, then
+/// the batch), the shadow stream's generator, its tracers, the probes'
+/// integration and the cache's fold, in that order.
 #[test]
 fn the_node_traces_both_streams_between_its_passes() {
     let Some(h) = harness(Setup::default(), Vec::new()) else {
@@ -52,6 +73,7 @@ fn the_node_traces_both_streams_between_its_passes() {
         common::pass_names(&h.graph),
         [
             "GI",
+            "RadianceCache",
             "AnalyticTracer",
             "GILight",
             "LightSampleGrid",
@@ -59,7 +81,9 @@ fn the_node_traces_both_streams_between_its_passes() {
             "GIShadow",
             "AnalyticTracer",
             "GIIntegrate",
-            "Capture"
+            "RadianceCacheFold",
+            "Capture",
+            "CacheReader"
         ]
     );
 }
@@ -182,8 +206,10 @@ fn the_sun_on_the_ground_lights_probes_from_below() {
     let Some(mut h) = harness(setup, vec![Shape::ground(0.0, HALF)]) else {
         return;
     };
-    h.frames(4);
-    let words = h.probes();
+    let clipmap = h.clipmap();
+    let words = frames_until(&mut h, "probes over the ground update", |words| {
+        updated(words, &clipmap, |at| at.y >= 0.5).len() > 1000
+    });
     let below = HALF * 2.0 / PI;
     let above = updated(&words, &h.clipmap(), |at| at.y >= 0.5);
     for &(index, at) in &above {
@@ -204,23 +230,27 @@ fn the_sun_on_the_ground_lights_probes_from_below() {
 }
 
 /// The irradiance / pi facing down of the probe at world `at` (a probe of
-/// the finest level), after `frames` frames.
-fn down_at(h: &mut Harness, at: DVec3, frames: usize) -> Vec3 {
-    h.frames(frames);
-    let words = h.probes();
+/// the finest level), once it has taken `updates` updates: its first may
+/// come while the cells its rays meet are new, answered from cells 8 times
+/// wider (`radiance_cache::ANCESTOR`), which a shadow's edge smears; the
+/// updates after read their own.
+fn down_at(h: &mut Harness, at: DVec3, updates: u32) -> Vec3 {
     let clipmap = h.clipmap();
     let index = helio_pass_gi::Clipmap::index(0, (at / clipmap.finest).round().as_i64vec3());
+    let words = frames_until(h, "the probe updates", |words| {
+        probe(words, index, Vec3::NEG_Y).1 >> 8 >= updates
+    });
     let (e, state) = probe(&words, index, Vec3::NEG_Y);
-    assert!(state >> 8 > 0 && state & 1 == 1, "probe at {at}: {state:x}");
+    assert!(state & 1 == 1, "probe at {at}: {state:x}");
     e
 }
 
 /// The sun straight down on lit ground, and a black roof (12 m square, 3 m
 /// up) over a probe a metre up: the ground under the roof is in its shadow,
-/// so the probe sees the lit ground only past it (a few percent of its view
-/// down, plus that light bounced in under the roof), where a probe in the
-/// open sees it all. The roof reflects nothing, so what the probe sees is
-/// the shadow, not light bounced between the roof and the ground.
+/// so the probe sees the lit ground only past it (2% of its view down
+/// weighted by the cosine: a square of half-width 6 m a metre down holds
+/// about 98%), where a probe in the open sees it all. The roof reflects
+/// nothing and flat ground sees no ground, so nothing is bounced in.
 #[test]
 fn a_roof_shadows_the_sun() {
     let setup = Setup {
@@ -237,11 +267,11 @@ fn a_roof_shadows_the_sun() {
     let Some(mut open) = harness(setup.clone(), vec![Shape::ground(0.0, HALF)]) else {
         return;
     };
-    let lit = down_at(&mut open, probe_at, 22);
+    let lit = down_at(&mut open, probe_at, 3);
     let Some(mut covered) = harness(setup, vec![Shape::ground(0.0, HALF), roof]) else {
         return;
     };
-    let shaded = down_at(&mut covered, probe_at, 22);
+    let shaded = down_at(&mut covered, probe_at, 3);
     let below = HALF * 2.0 / PI;
     assert!(
         (lit - Vec3::splat(below)).abs().max_element() < 0.05 * below,
@@ -274,11 +304,11 @@ fn a_table_shadows_a_point_light() {
     let Some(mut open) = harness(setup.clone(), vec![Shape::ground(0.0, HALF)]) else {
         return;
     };
-    let lit = down_at(&mut open, probe_at, 22);
+    let lit = down_at(&mut open, probe_at, 3);
     let Some(mut covered) = harness(setup, vec![Shape::ground(0.0, HALF), table]) else {
         return;
     };
-    let shaded = down_at(&mut covered, probe_at, 22);
+    let shaded = down_at(&mut covered, probe_at, 3);
     assert!(
         lit.min_element() > 0.1,
         "the light lights the ground: {lit}"
@@ -299,8 +329,10 @@ fn glowing_ground_lights_probes() {
     ) else {
         return;
     };
-    h.frames(4);
-    let words = h.probes();
+    let clipmap = h.clipmap();
+    let words = frames_until(&mut h, "probes over the floor update", |words| {
+        updated(words, &clipmap, |at| at.y >= 0.5).len() > 1000
+    });
     let over = updated(&words, &h.clipmap(), |at| at.y >= 0.5);
     for &(index, at) in &over {
         let down = probe(&words, index, Vec3::NEG_Y).0;
@@ -328,8 +360,10 @@ fn light_through_a_canopy_lights_probes_under_it() {
     let Some(mut h) = harness(setup, vec![canopy]) else {
         return;
     };
-    h.frames(4);
-    let words = h.probes();
+    let clipmap = h.clipmap();
+    let words = frames_until(&mut h, "probes under the canopy update", |words| {
+        updated(words, &clipmap, |at| (0.0..4.0).contains(&at.y)).len() > 500
+    });
     let through = 77.0 / 255.0;
     let above = through * HALF * 2.0 / PI;
     // The underside also passes on the light under it (the probes' own,
@@ -462,9 +496,11 @@ fn probes_hold_while_a_tracer_answers_short() {
     }
 }
 
-/// Each stream counts its rays into the frame's statistics: every probe
-/// ray, and the shadow rays the hits asked for (a sun ray from each probe
-/// ray over sunlit ground).
+/// Each stream counts its rays into the frame's statistics: GI's stream
+/// every probe ray and the cache's (`rays.radiance_cache`, counted apart),
+/// the shadow stream the cache rays' shadow rays (its cells' and their
+/// hits', over sunlit ground: at most two a cache ray). The cache lights
+/// cells from the frame after a reader first marked them.
 #[test]
 fn each_stream_counts_its_rays() {
     let setup = Setup {
@@ -474,33 +510,26 @@ fn each_stream_counts_its_rays() {
     let Some(mut h) = harness(setup, vec![Shape::ground(0.0, HALF)]) else {
         return;
     };
-    let gpu = h.gpu;
-    let cycle = |stats: &helio_core::FrameStats| {
-        let mut encoder = gpu.device.create_command_encoder(&Default::default());
-        stats.cycle(&mut encoder);
-        gpu.queue.submit([encoder.finish()]);
-        stats.submitted();
-        gpu.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .unwrap();
+    let start = std::time::Instant::now();
+    let latest = loop {
+        let stats = h.frame_stats();
+        if stats.get("rays.radiance_cache").unwrap_or(0) > 0 {
+            break stats;
+        }
+        assert!(start.elapsed().as_secs() < 120, "the cache traced no rays");
     };
-    cycle(&h.stats);
-    h.frames(1);
-    cycle(&h.stats);
-    cycle(&h.stats);
-    let latest = h.stats.latest();
-    let probes = latest
-        .get("rays.gi_probe")
-        .expect("the probe stream counts");
+    let rays = latest.get("rays.gi").expect("GI's stream counts");
+    let cache = latest.get("rays.radiance_cache").unwrap();
     let shadows = latest
-        .get("rays.gi_shadow")
+        .get("rays.radiance_cache_shadow")
         .expect("the shadow stream counts");
-    assert_eq!(probes, u64::from(helio_pass_gi::MAX_RAYS));
-    // About half the rays go down to the ground (those of probes under it
-    // meet its inside, and ask for none).
+    assert_eq!(rays, u64::from(helio_pass_gi::MAX_RAYS) + cache);
+    assert_eq!(cache % u64::from(helio_pass_gi::cache::RAYS_PER_CELL), 0);
+    // The ground's cells see the sun (a shadow ray each), their rays up
+    // miss (none), their rays' hits on the ground from below are insides.
     assert!(
-        shadows > probes / 8 && shadows < probes,
-        "{shadows} shadow rays of {probes}"
+        shadows >= cache / 2 && shadows <= 2 * cache,
+        "{shadows} shadow rays of {cache} cache rays"
     );
 }
 
