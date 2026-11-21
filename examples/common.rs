@@ -606,6 +606,20 @@ pub fn features() -> helio_feature_api::FeatureSet {
 }
 
 /// The deferred preset with the lighting plugins' features.
+/// GI's settings `settings` with an A/B run's choice of GI over them:
+/// `HELIO_GI_QUALITY` (`probes`, `pixels_16`, `pixels_4`, `pixels_1`: the
+/// `gi` group's `quality`) and `HELIO_GI_PIXEL_REUSE=0` (no sample reuse).
+pub fn gi_settings(mut settings: helio_pass_gi::GiSettings) -> helio_pass_gi::GiSettings {
+    if let Ok(quality) = std::env::var("HELIO_GI_QUALITY") {
+        settings.quality = helio_pass_gi::GiQuality::from_key(&quality)
+            .unwrap_or_else(|| panic!("HELIO_GI_QUALITY: no quality `{quality}`"));
+    }
+    if let Ok(reuse) = std::env::var("HELIO_GI_PIXEL_REUSE") {
+        settings.pixel_reuse = reuse != "0";
+    }
+    settings
+}
+
 pub fn preset() -> helio_presets::PresetGraph {
     helio_mesh_host::presets::with(helio_presets::Preset::Deferred, &features())
 }

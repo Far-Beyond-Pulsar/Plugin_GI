@@ -8,6 +8,7 @@
 //!use gi_common
 //!use gi_sample
 //!use gi_rays
+//!use gi_hit
 // The light of GI's rays' hits (README.md, "The frame"), once every tracer
 // answered GI's stream: the probes' rays (a workgroup a probe, a lane a
 // ray), then the radiance cache's (a lane a ray).
@@ -70,18 +71,6 @@ override GI_SHADOW_STAT: u32 = 0u;
 // Cells the cache lights a frame at most (`CacheConfig::cells`).
 override CACHE_CELLS: u32 = 8192u;
 
-const PI: f32 = 3.14159265;
-
-// The sky's radiance along unit direction `d` from eye-relative point
-// `from_camera` (km): the atmosphere's sky table there (irradiance / pi in
-// L2 harmonics, cosine-convolved) back to radiance, band by band; without
-// an atmosphere, the flat sky and ground.
-fn sky_radiance(from_camera: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
-    if sky_frame.planet.w < 0.5 { return select(frame_gi.ground.rgb, frame_gi.sky.rgb, d.y >= 0.0); }
-    // The basis over each band's convolution (1, 2/3, 1/4).
-    return sky_table_eval(from_camera, d, vec3<f32>(1.0, 1.5, 4.0));
-}
-
 var<workgroup> w_rows: atomic<u32>;
 var<workgroup> w_hit: atomic<u32>;
 var<workgroup> w_base: u32;
@@ -90,26 +79,6 @@ var<workgroup> w_cache: u32;
 // The cache's rays this frame.
 fn cache_rays_count() -> u32 {
     return min(cache_plan[CACHE_PLAN_CELLS], CACHE_CELLS) * CACHE_RAYS;
-}
-
-// How many levels coarser than its own cell a GI ray's hit may read while
-// its cell has no value: one, a cell twice as wide. Coarser ones (a mark's
-// ancestor is 8 times wider) span thin walls and floors under them, so a
-// probe's first update would take both sides' light into its history.
-const GI_CACHE_REACH: u32 = 1u;
-
-// The irradiance / pi the cache holds at eye-relative hit `at` on the side of
-// unit `side` for a ray of footprint `footprint` in space `space` (its
-// indirect part alone for `indirect_only`), marking its cell, and 1 in w;
-// where it holds none within GI_CACHE_REACH, the probes' at the hit toward
-// `n` (their own previous state, as a bounce took it before the cache), and
-// 0 in w.
-fn hit_irradiance(at: vec3<f32>, side: vec3<f32>, n: vec3<f32>, footprint: f32, space: u32, indirect_only: bool) -> vec4<f32> {
-    let p = at + gi_trace.eye.xyz;
-    let c = radiance_cache_read(p, side, footprint, space, GI_CACHE_REACH);
-    radiance_cache_mark(p, side, footprint, space);
-    if !c.found { return vec4<f32>(gi_irradiance(at, n).rgb, 0.0); }
-    return vec4<f32>((c.indirect + select(c.direct, vec3<f32>(0.0), indirect_only)) / PI, 1.0);
 }
 
 @compute @workgroup_size(64)
@@ -179,26 +148,16 @@ fn gi_light(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
                 pending.t = t;
                 // The hit's surface: the frame's `SurfaceData`, as a G-buffer
                 // texel holds it. GI's stream asks for
-                // `SurfaceDetail::Diffuse`: lit as Lambertian here, on the
-                // side the ray met (its face turned toward the ray).
-                let face = scene_surface_face(surface);
-                let side = select(face, -face, dot(face, dir) > 0.0);
+                // `SurfaceDetail::Diffuse`: lit as Lambertian (`gi_hit`), on
+                // the side the ray met. A probe's hit the cache could not
+                // light yet, where it matters (a surface that reflects or lets
+                // light through): `gi_integrate` holds a probe with many.
                 let n = s.normal;
                 let footprint = width + spread * hit.t;
-                // The share of the light behind it that passes through, by
-                // colour (two-sided leaves).
                 let through = surface_transmission(s);
-                let front = hit_irradiance(at, side, n, footprint, space, !probe);
-                rest = s.albedo.rgb * front.rgb + s.emissive;
-                // A probe's hit the cache could not light yet, where it
-                // matters (a surface that reflects or lets light through):
-                // `gi_integrate` holds a probe with many.
-                var answered = front.w > 0.0 || all(s.albedo.rgb == vec3<f32>(0.0));
-                if any(through > vec3<f32>(0.0)) {
-                    let back = hit_irradiance(at, -side, -n, footprint, space, !probe);
-                    rest += through * back.rgb;
-                    answered = answered && back.w > 0.0;
-                }
+                let lit = gi_hit_light(at, dir, surface, footprint, space, !probe);
+                rest = lit.rgb;
+                let answered = lit.w > 0.0;
                 if probe && !answered { pending.light = GI_UNLIT; }
                 if !probe {
                     // Its direct light: one light sample at the hit, as wide
@@ -210,7 +169,7 @@ fn gi_light(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
                 }
             }
         } else {
-            rest = sky_radiance(origin * 0.001, dir);
+            rest = gi_sky_radiance(origin * 0.001, dir);
         }
         if !probe {
             // The cell's own direct light: one light sample at its point (the

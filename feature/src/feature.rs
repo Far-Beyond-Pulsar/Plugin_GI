@@ -12,12 +12,18 @@
 //! cache's fold. GI reads no light kind: what lights its cells comes as
 //! light samples. The resolve
 //! joins at [`Slot::LightingInputs`], publishing the frame's indirect
-//! diffuse. Where nothing traces rays (no kind registered a tracer this
-//! device runs), neither builds.
+//! diffuse: the probes' irradiance, or (the `quality` setting, the primary
+//! view) the pixels' gather ([`crate::gather`]) built there first, its rays
+//! traced by the same tracers, its signal filtered by the frame's denoiser.
+//! Where nothing traces rays (no kind registered a tracer this device runs),
+//! neither builds.
 //!
 //! GI offers the distance at which its indirect diffuse resolves occlusion
-//! (`helio_frame_api::lighting::indirect_occlusion`): twice the finest
-//! probes' spacing, wherever both nodes build.
+//! (`helio_frame_api::lighting::indirect_occlusion`), wherever both nodes
+//! build: twice the finest probes' spacing, or with the pixels' gather the
+//! distance its rays start off their surface
+//! ([`crate::gather::OCCLUSION_START`]: nearer than a block's footprint the
+//! near field resolves it at every pixel).
 
 use std::sync::Arc;
 
@@ -27,6 +33,7 @@ use helio_feature_api::{
 use helio_frame_api::lighting::indirect_occlusion::OfferIndirectOcclusion;
 use helio_frame_api::lighting::{inputs_order, InputsOrder};
 use helio_frame_api::rays::{light_samples, stream};
+use helio_frame_api::view::view_of;
 use helio_frame_api::{FrameNode, Slot};
 
 use crate::{
@@ -70,7 +77,22 @@ fn occlusion_distance(env: &mut BuildEnv<'_>) -> Option<f32> {
     if !resolves(env) {
         return None;
     }
-    Some(OCCLUSION_SPACINGS * settings(env).config().finest_spacing as f32)
+    let config = settings(env).config();
+    if gathers(env).is_some() {
+        return Some(crate::gather::OCCLUSION_START);
+    }
+    Some(OCCLUSION_SPACINGS * config.finest_spacing as f32)
+}
+
+/// The pixels' gather a graph built in `env` runs, if its setting asks: the
+/// primary view's (a capture or another view resolves the probes, as
+/// before; the gather's reservoirs and the denoiser's history are one
+/// view's each, and a capture's cost would be the gather's again).
+fn gathers(env: &BuildEnv<'_>) -> Option<crate::GatherConfig> {
+    settings(env)
+        .config()
+        .pixels
+        .filter(|_| view_of(env).is_primary())
 }
 
 fn node(
@@ -177,13 +199,22 @@ impl Feature for GiFeature {
             node(
                 RESOLVE,
                 "GI: Resolve",
-                "The probes' irradiance at every pixel (the frame's indirect diffuse) for the lighting. Builds nothing where the lighting ran before it (forward) or nothing traces rays.",
+                "The frame's indirect diffuse for the lighting: the probes' irradiance at every pixel, or (the `quality` setting) the pixels' own rays lit from the radiance cache, reused and denoised. Builds nothing where the lighting ran before it (forward) or nothing traces rays.",
                 |build| {
-                    if resolves(build.env) {
-                        build
-                            .graph
-                            .add_pass(Box::new(GiResolvePass::new(build.env.device)));
+                    if !resolves(build.env) {
+                        return Ok(());
                     }
+                    let gathered = match gathers(build.env) {
+                        Some(config) => crate::gather::build(build, config)?
+                            .map(|filtered| (filtered, config.block.side())),
+                        None => None,
+                    };
+                    let device = build.env.device.clone();
+                    let pass = match gathered {
+                        Some((filtered, side)) => GiResolvePass::with_gather(&device, filtered, side),
+                        None => GiResolvePass::new(&device),
+                    };
+                    build.graph.add_pass(Box::new(pass));
                     Ok(())
                 },
             )

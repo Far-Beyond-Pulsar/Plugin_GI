@@ -41,7 +41,7 @@ use crate::{
 };
 
 /// The snippets `gi_light.wgsl` is built with.
-pub(crate) const SNIPPETS: [helio_core::shader::ShaderSnippet; 10] = [
+pub(crate) const SNIPPETS: [helio_core::shader::ShaderSnippet; 11] = [
     SKY_SNIPPET,
     SKY_TABLE_SNIPPET,
     stream::SNIPPET,
@@ -52,6 +52,7 @@ pub(crate) const SNIPPETS: [helio_core::shader::ShaderSnippet; 10] = [
     GI_COMMON_SNIPPET,
     GI_SAMPLE_SNIPPET,
     GI_RAYS_SNIPPET,
+    crate::GI_HIT_SNIPPET,
 ];
 
 fn module(device: &wgpu::Device) -> wgpu::ShaderModule {
