@@ -257,7 +257,7 @@ a pixel's gather, reflections). GI publishes it (`cache.rs`,
 ## The pixels' gather
 
 With the `quality` setting at `pixels_16`, `pixels_4` or `pixels_1` (the
-`gi` host group; default `pixels_4`), the resolve node builds the pixels'
+`gi` host group; default `pixels_16`), the resolve node builds the pixels'
 gather before the resolve, in the primary view (captures and other views
 resolve the probes). Frame contracts only (`gather.rs`, `gi_gather.wgsl`):
 

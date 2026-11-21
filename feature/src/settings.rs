@@ -25,10 +25,11 @@ pub enum GiQuality {
 }
 
 impl GiQuality {
-    /// The default: the pixels' gather at one ray a 2x2 block
-    /// (rendering.md, "Indirect diffuse at a pixel": the measured cost and
-    /// error of each).
-    pub const DEFAULT: Self = Self::Pixels(TraceBlock::Four);
+    /// The default: the pixels' gather at one ray a 4x4 block, the cheapest
+    /// gather, which halved the cathedral's per-pixel error against the
+    /// reference path tracer (rendering.md, "Indirect diffuse at a pixel":
+    /// the measured cost and error of each).
+    pub const DEFAULT: Self = Self::Pixels(TraceBlock::Sixteen);
 
     /// The setting's value (`quality` in [`GI`]).
     pub fn key(self) -> &'static str {
@@ -164,7 +165,7 @@ pub static GI: Group = Group {
             "GI Quality",
             "Global Illumination",
             QUALITIES,
-            "pixels_4",
+            "pixels_16",
             "Indirect diffuse at a pixel: the probes' (cheapest), or rays from the pixels \
              themselves (one a block of 16, 4 or every pixel), lit from the radiance cache, \
              reused across frames and neighbours and denoised: contact detail and occlusion the \
@@ -228,7 +229,7 @@ mod tests {
         assert_eq!(
             GiSettings::default().config().pixels,
             Some(GatherConfig {
-                block: TraceBlock::Four,
+                block: TraceBlock::Sixteen,
                 reuse: true
             })
         );

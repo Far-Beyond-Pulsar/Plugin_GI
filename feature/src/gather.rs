@@ -579,17 +579,32 @@ impl RenderPass for GiGatherPass {
         let traced = [self.gpu.size[2], self.gpu.size[3]];
         let mut cmds = ctx.graphics_cmds();
         rays.clear(&mut cmds);
-        {
-            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("GI gather"),
-                timestamp_writes: None,
-            });
-            pass.set_bind_group(0, Some(&near_group), &[]);
-            pass.set_pipeline(&self.near_pipeline);
-            pass.dispatch_workgroups(size[0].div_ceil(8), size[1].div_ceil(8), 1);
-            pass.set_bind_group(0, Some(&rays_group), &[]);
-            pass.set_pipeline(&self.rays_pipeline);
-            pass.dispatch_workgroups(traced[0].div_ceil(8), traced[1].div_ceil(8), 1);
+        // A GPU scope a stage: the near field (a pixel), the rays (a texel).
+        for (scope, group, pipeline, groups) in [
+            (
+                "GI gather: near field",
+                &near_group,
+                &self.near_pipeline,
+                [size[0].div_ceil(8), size[1].div_ceil(8)],
+            ),
+            (
+                "GI gather: rays",
+                &rays_group,
+                &self.rays_pipeline,
+                [traced[0].div_ceil(8), traced[1].div_ceil(8)],
+            ),
+        ] {
+            ctx.begin_gpu_scope(&mut cmds, scope);
+            {
+                let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some(scope),
+                    timestamp_writes: None,
+                });
+                pass.set_bind_group(0, Some(group), &[]);
+                pass.set_pipeline(pipeline);
+                pass.dispatch_workgroups(groups[0], groups[1], 1);
+            }
+            ctx.end_gpu_scope(&mut cmds, scope);
         }
         view.primed = true;
         Ok(())
@@ -874,14 +889,23 @@ impl RenderPass for GiGatherShadePass {
         );
         let groups = [traced[0].div_ceil(8), traced[1].div_ceil(8)];
         let mut cmds = ctx.graphics_cmds();
-        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("GI gather shade"),
-            timestamp_writes: None,
-        });
-        pass.set_bind_group(0, Some(&group), &[]);
-        for pipeline in [&self.validate, &self.temporal, &self.spatial] {
-            pass.set_pipeline(pipeline);
-            pass.dispatch_workgroups(groups[0], groups[1], 1);
+        // A GPU scope a stage (`GI gather: validate`, ...).
+        for (scope, pipeline) in [
+            ("GI gather: validate", &self.validate),
+            ("GI gather: temporal", &self.temporal),
+            ("GI gather: spatial", &self.spatial),
+        ] {
+            ctx.begin_gpu_scope(&mut cmds, scope);
+            {
+                let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some(scope),
+                    timestamp_writes: None,
+                });
+                pass.set_bind_group(0, Some(&group), &[]);
+                pass.set_pipeline(pipeline);
+                pass.dispatch_workgroups(groups[0], groups[1], 1);
+            }
+            ctx.end_gpu_scope(&mut cmds, scope);
         }
         Ok(())
     }
