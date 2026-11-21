@@ -670,8 +670,24 @@ fn gather_spatial(@builtin(global_invocation_id) id: vec3<u32>) {
     let own = reservoirs[i];
     let t = texels[i];
     if (own.flags & RESERVOIR_VALID) == 0u {
-        textureStore(signal0, b, vec4<f32>(0.0, 0.0, 0.0, GATHER_NO_HIT));
-        textureStore(signal1, b, vec4<f32>(0.0, 0.0, 0.0, 1.0));
+        // No sample here this frame (a frame a tracer answered short, with
+        // no reservoir to hold; the first frames): the probes' irradiance at
+        // the traced pixel stands in, as it does for a hit the cache has no
+        // cell for, rather than a sample of no light the denoiser would
+        // take as dark. Its history kept (confidence 1). The sky and
+        // remapped content: no sample (the denoiser skips the sky; the
+        // resolve takes the probes for remapped pixels).
+        var input = DenoiseIrradianceInput(vec4<f32>(0.0, 0.0, 0.0, GATHER_NO_HIT), vec4<f32>(0.0, 0.0, 0.0, 1.0));
+        let p = vec2<i32>(traced_pixel(id.xy));
+        let at = position_at(p);
+        if at.w > 0.0 && !remapped(p) {
+            let n = helio_gbuffer_normal(textureLoad(gbuf_normal, p, 0).xyz);
+            let e = PI * gi_irradiance(at.xyz - gi_trace.eye.xyz, n).rgb;
+            input.signal0.w = f32(side()) * footprint_at(at.xyz);
+            input = denoise_irradiance_add(input, e, n);
+        }
+        textureStore(signal0, b, input.signal0);
+        textureStore(signal1, b, input.signal1);
         return;
     }
     let x = own.receiver;
