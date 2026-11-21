@@ -83,10 +83,10 @@ whole update:
      through, the probes' coordinate space), packed into GI's light batch
      (`gi_probe`, `light_batch()`) from row 0, a workgroup's together.
 
-   A miss takes the sky: the atmosphere's sky table at the probe,
-   cosine-convolved L2 harmonics turned back into radiance band by band;
-   without an atmosphere, the flat ambient above the horizon and 0.15 of it
-   below. What it has into `gi_pending` (RGB9E5, 16 bytes a ray).
+   A miss takes the sky: the atmosphere's radiance table at the probe
+   (`sky_radiance_eval`: the sky's radiance by direction, which from the
+   eye is the sky the sky pass draws); without an atmosphere, the flat
+   ambient above the horizon and 0.15 of it below. What it has into `gi_pending` (RGB9E5, 16 bytes a ray).
 4. **The light samplers** (`light_samples::sample`): every kind of light
    that registered a sampler offers one of its lights at each query (the
    lights' sampler: its point, spot and directional lights, the sun through

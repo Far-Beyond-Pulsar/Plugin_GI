@@ -502,8 +502,8 @@ pub struct Setup {
     pub traced: bool,
     /// A second tracer, short while this is set ([`late_tracer`]).
     pub late: Option<Arc<std::sync::atomic::AtomicBool>>,
-    /// An atmosphere whose sky is black (its frame and sky table published
-    /// as the sky publishes them), over the flat sky.
+    /// An atmosphere whose sky is black (its frame published as the sky
+    /// publishes it, with no suns), over the flat sky.
     pub black_atmosphere: bool,
 }
 
@@ -576,8 +576,8 @@ pub struct Harness {
     target: wgpu::TextureView,
     depth: wgpu::TextureView,
     captured: Arc<Mutex<Option<[wgpu::Buffer; 2]>>>,
-    /// The atmosphere's frame and sky table, when the setup has one.
-    atmosphere: Option<[wgpu::Buffer; 2]>,
+    /// The atmosphere's frame, when the setup has one.
+    atmosphere: Option<wgpu::Buffer>,
 }
 
 fn storage_init(gpu: &Gpu, label: &str, bytes: &[u8]) -> wgpu::Buffer {
@@ -738,22 +738,19 @@ impl Harness {
                 })
                 .create_view(&Default::default())
         };
-        use helio_frame_api::lighting::sky::{SKY_FRAME_BYTES, SKY_TABLE_BYTES};
+        use helio_frame_api::lighting::sky::SKY_FRAME_BYTES;
         let atmosphere = setup.black_atmosphere.then(|| {
-            let uniform = |bytes: &[u8]| {
-                use wgpu::util::DeviceExt;
-                gpu.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("test atmosphere"),
-                        contents: bytes,
-                        usage: wgpu::BufferUsages::UNIFORM,
-                    })
-            };
-            // `SkyFrame.planet.w` 1: an atmosphere is active; nothing else.
+            use wgpu::util::DeviceExt;
+            // `SkyFrame.planet.w` 1: an atmosphere is active; no suns, so
+            // no sky (GI binds the radiance table's stand-in).
             let mut frame = vec![0f32; (SKY_FRAME_BYTES / 4) as usize];
             frame[3] = 1.0;
-            let table = vec![0u8; SKY_TABLE_BYTES as usize];
-            [uniform(bytemuck::cast_slice(&frame)), uniform(&table)]
+            gpu.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("test atmosphere"),
+                    contents: bytemuck::cast_slice(&frame),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                })
         });
         Self {
             gpu,
@@ -790,16 +787,11 @@ impl Harness {
             },
             "test",
         );
-        if let Some([frame, table]) = &self.atmosphere {
-            use helio_frame_api::lighting::sky::{SKY_FRAME, SKY_TABLE};
+        if let Some(frame) = &self.atmosphere {
+            use helio_frame_api::lighting::sky::SKY_FRAME;
             registry.write(
                 helio_core::ResourceKey::<&wgpu::Buffer>::new(SKY_FRAME),
                 frame,
-                "test",
-            );
-            registry.write(
-                helio_core::ResourceKey::<&wgpu::Buffer>::new(SKY_TABLE),
-                table,
                 "test",
             );
         }

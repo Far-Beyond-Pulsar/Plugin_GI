@@ -22,7 +22,8 @@
 
 use helio_core::{PassContext, RenderPass, Result as HelioResult};
 use helio_frame_api::lighting::sky::{
-    SKY_FRAME, SKY_FRAME_BYTES, SKY_SNIPPET, SKY_TABLE, SKY_TABLE_BYTES, SKY_TABLE_SNIPPET,
+    sky_radiance_sampler, sky_radiance_stand_in, SKY_FRAME, SKY_FRAME_BYTES, SKY_RADIANCE,
+    SKY_RADIANCE_SNIPPET, SKY_SNIPPET,
 };
 use helio_frame_api::rays::light_samples::{self, LightBatch, LightBatchBuffers};
 use helio_frame_api::rays::stream::{self, Stream, StreamBuffers};
@@ -36,7 +37,7 @@ use crate::{
 /// The snippets `gi_light.wgsl` is built with.
 pub(crate) const SNIPPETS: [helio_core::shader::ShaderSnippet; 9] = [
     SKY_SNIPPET,
-    SKY_TABLE_SNIPPET,
+    SKY_RADIANCE_SNIPPET,
     stream::SNIPPET,
     stream::SURFACE_SNIPPET,
     helio_frame_api::gbuffer::SURFACE_SNIPPET,
@@ -66,7 +67,8 @@ pub struct GiLightPass {
     light: wgpu::ComputePipeline,
     header: wgpu::ComputePipeline,
     no_atmosphere: wgpu::Buffer,
-    no_sky_table: wgpu::Buffer,
+    no_sky_radiance: wgpu::TextureView,
+    sky_radiance_sampler: wgpu::Sampler,
     cache: helio_core::gpu_cache::GpuCache,
     reads: &'static [&'static str],
     writes: &'static [&'static str],
@@ -81,7 +83,24 @@ impl GiLightPass {
                 storage(1, true),
                 storage(2, true),
                 uniform(3, SKY_FRAME_BYTES),
-                uniform(4, SKY_TABLE_BYTES),
+                // The sky a probe ray that meets nothing takes
+                // (`sky_radiance_eval`): the radiance table, its sampler.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 17,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
                 uniform(5, TRACE_BYTES),
                 storage(6, true),
                 storage(7, true),
@@ -104,7 +123,7 @@ impl GiLightPass {
             GI_ANSWERED,
             probes.hits,
             SKY_FRAME,
-            SKY_TABLE,
+            SKY_RADIANCE,
         ];
         reads.extend(probes.surfaces);
         Self {
@@ -124,12 +143,8 @@ impl GiLightPass {
                 SKY_FRAME_BYTES,
                 uniform_usage,
             ),
-            no_sky_table: buffer(
-                device,
-                "GI light no sky table",
-                SKY_TABLE_BYTES,
-                uniform_usage,
-            ),
+            no_sky_radiance: sky_radiance_stand_in(device),
+            sky_radiance_sampler: sky_radiance_sampler(device),
             cache: helio_core::gpu_cache::GpuCache::new(),
             reads: helio_frame_api::static_names(&reads),
             writes: helio_frame_api::static_names(&[
@@ -180,9 +195,17 @@ impl RenderPass for GiLightPass {
         else {
             return Ok(());
         };
-        let [atmosphere, sky_table] = crate::sky(ctx.registry);
-        let atmosphere = atmosphere.unwrap_or(&self.no_atmosphere);
-        let sky_table = sky_table.unwrap_or(&self.no_sky_table);
+        // The sky as the atmosphere publishes it, if any.
+        let atmosphere = ctx
+            .registry
+            .get(helio_core::ResourceKey::<&wgpu::Buffer>::new(SKY_FRAME))
+            .unwrap_or(&self.no_atmosphere);
+        let sky_radiance = ctx
+            .registry
+            .get(helio_core::ResourceKey::<&wgpu::TextureView>::new(
+                SKY_RADIANCE,
+            ))
+            .unwrap_or(&self.no_sky_radiance);
         self.cache.end_frame();
         let group = self.cache.bind_group(
             ctx.device,
@@ -194,7 +217,14 @@ impl RenderPass for GiLightPass {
                     entry(1, probes),
                     entry(2, lists),
                     entry(3, atmosphere),
-                    entry(4, sky_table),
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(sky_radiance),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 17,
+                        resource: wgpu::BindingResource::Sampler(&self.sky_radiance_sampler),
+                    },
                     entry(5, trace),
                     entry(6, hits),
                     entry(7, surfaces),

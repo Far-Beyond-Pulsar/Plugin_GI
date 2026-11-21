@@ -1,5 +1,5 @@
 //!use frame_sky
-//!use sky_table
+//!use sky_radiance
 //!use frame_ray_stream
 //!use frame_ray_surface
 //!use frame_surface
@@ -26,7 +26,8 @@
 @group(0) @binding(1) var<storage, read> gi_probes: array<u32>;
 @group(0) @binding(2) var<storage, read> gi_lists: array<u32>;
 @group(0) @binding(3) var<uniform> sky_frame: SkyFrame;
-@group(0) @binding(4) var<uniform> sky_table: array<vec4<f32>, 2304>;
+@group(0) @binding(4) var sky_radiance: texture_3d<f32>;
+@group(0) @binding(17) var sky_radiance_sampler: sampler;
 @group(0) @binding(5) var<uniform> gi_trace: GiTrace;
 // The probe stream as the tracers left it (`gi_probe`).
 @group(0) @binding(6) var<storage, read> probe_hits: array<SceneHit>;
@@ -55,13 +56,12 @@ override GI_SHADOW_STAT: u32 = 0u;
 const PI: f32 = 3.14159265;
 
 // The sky's radiance along unit direction `d` from eye-relative point
-// `from_camera` (km): the atmosphere's sky table there (irradiance / pi in
-// L2 harmonics, cosine-convolved) back to radiance, band by band; without
+// `from_camera` (km): the atmosphere's radiance table there
+// (`sky_radiance_eval`, from the eye the sky the sky pass draws); without
 // an atmosphere, the flat sky and ground.
-fn sky_radiance(from_camera: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
+fn sky_radiance_at(from_camera: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
     if sky_frame.planet.w < 0.5 { return select(frame_gi.ground.rgb, frame_gi.sky.rgb, d.y >= 0.0); }
-    // The basis over each band's convolution (1, 2/3, 1/4).
-    return sky_table_eval(from_camera, d, vec3<f32>(1.0, 1.5, 4.0));
+    return sky_radiance_eval(from_camera, d);
 }
 
 var<workgroup> w_rows: atomic<u32>;
@@ -133,7 +133,7 @@ fn gi_light(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
             want = true;
         }
     } else {
-        rest = sky_radiance(probe * 0.001, dir);
+        rest = sky_radiance_at(probe * 0.001, dir);
     }
     pending.rest = scene_pack_radiance(rest);
     // The workgroup's queries in one block of the batch.

@@ -30,7 +30,6 @@
 use glam::{DVec3, Vec3};
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, ResourceKey, Result as HelioResult};
-use helio_frame_api::lighting::sky::{SKY_FRAME, SKY_TABLE};
 use helio_frame_api::lighting::{
     VIEW_REMAPS, VIEW_REMAPS_BYTES, VIEW_REMAP_SPACES, VIEW_REMAP_SPACES_BYTES,
 };
@@ -247,13 +246,6 @@ fn compute(
             cache: None,
         },
     )
-}
-
-/// The atmosphere's frame and sky table, as the sky publishes them (registry
-/// values under `SKY_FRAME` and `SKY_TABLE`), if any: the one lookup GI's
-/// passes share (the sky a probe ray meets).
-fn sky<'a>(registry: &helio_core::ResourceRegistry<'a>) -> [Option<&'a wgpu::Buffer>; 2] {
-    [SKY_FRAME, SKY_TABLE].map(|name| registry.get::<&'a wgpu::Buffer>(ResourceKey::new(name)))
 }
 
 fn pipeline_layout(
