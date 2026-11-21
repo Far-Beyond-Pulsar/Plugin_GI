@@ -1,5 +1,6 @@
-//! The GPU cost of GI's own passes (generation, the hits' light, the
-//! integration) over the analytic tracer, from GPU timestamps of pipelined
+//! The GPU cost of GI's own passes (generation, the radiance cache's
+//! selection and rays, the hits' light, the cache rays' shadow rays, the
+//! integration, the cache's fold) over the analytic tracer, from GPU timestamps of pipelined
 //! frames: the graph never waits for a frame, the test only polls. Ignored
 //! by default (a measurement, not a check):
 //! `cargo test -p helio-pass-gi --test cost -- --ignored --nocapture`.
@@ -58,7 +59,15 @@ fn gpu_cost_of_gi_passes() {
         eprintln!("no GPU timestamps on this adapter");
         return;
     }
-    let names = ["GI", "GILight", "GIIntegrate", "AnalyticTracer"];
+    let names = [
+        "GI",
+        "RadianceCache",
+        "GILight",
+        "GIShadow",
+        "GIIntegrate",
+        "RadianceCacheFold",
+        "AnalyticTracer",
+    ];
     let base = Setup {
         sky: 1.0,
         sun: Some(3.0),

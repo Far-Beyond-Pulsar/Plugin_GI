@@ -53,6 +53,10 @@ pub const GI_IRRADIANCE: &str = helio_frame_api::lighting::INDIRECT_DIFFUSE;
 /// Debug mode of the probes' view (`GiResolvePass`; deferred lighting shows
 /// it as it shows `gi_irradiance`).
 pub const GI_PROBES_VIEW: u32 = 36;
+/// Debug mode of the radiance cache's view (`GiResolvePass`: the cell a
+/// pixel-wide ray's read finds at each pixel's surface; deferred lighting
+/// shows it as it shows `gi_irradiance`).
+pub const RADIANCE_CACHE_VIEW: u32 = 39;
 
 /// The probes' shared WGSL (`gi_common.wgsl`: the clipmap, a probe's record,
 /// its rays' directions): a reader opts in with `//!use gi_common`.

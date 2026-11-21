@@ -1,10 +1,10 @@
 //! This frame's probe rays into their probes (`gi_integrate.wgsl`, README.md
-//! "The frame"), once the shadow stream's tracers answered: the probes
-//! update in the frame their rays were traced in. On a frame where a tracer
-//! answered either stream short (`stream::Answers`: a kind's kernels still
-//! compiling, what it traces not drawn yet) the probes hold: rays that miss
-//! geometry a tracer knows of would teach them a world without it, and their
-//! history keeps what it is taught for many updates.
+//! "The frame"), once their hits were lit from the radiance cache: the
+//! probes update in the frame their rays were traced in. On a frame where a
+//! tracer answered GI's stream short (`stream::Answers`: a kind's kernels
+//! still compiling, what it traces not drawn yet) the probes hold: rays that
+//! miss geometry a tracer knows of would teach them a world without it, and
+//! their history keeps what it is taught for many updates.
 
 use std::sync::Arc;
 
@@ -22,19 +22,18 @@ pub(crate) const SNIPPETS: [helio_core::shader::ShaderSnippet; 3] =
 
 /// The probes' integration (module docs).
 pub struct GiIntegratePass {
-    /// The probe stream's answers and the shadow stream's.
-    answers: [Arc<stream::Answers>; 2],
+    /// GI's stream's answers.
+    answers: Arc<stream::Answers>,
     layout: wgpu::BindGroupLayout,
     pipeline: wgpu::ComputePipeline,
-    shadow_hits: &'static str,
     cache: helio_core::gpu_cache::GpuCache,
     reads: &'static [&'static str],
 }
 
 impl GiIntegratePass {
-    /// The pass, holding the probes on frames where `answers` (the probe
-    /// stream's, the shadow stream's) were short.
-    pub fn new(device: &wgpu::Device, answers: [Arc<stream::Answers>; 2]) -> Self {
+    /// The pass, holding the probes on frames where `answers` (GI's
+    /// stream's) were short.
+    pub fn new(device: &wgpu::Device, answers: Arc<stream::Answers>) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("GI integrate"),
             entries: &[
@@ -42,7 +41,6 @@ impl GiIntegratePass {
                 storage(1, false),
                 storage(2, true),
                 storage(3, true),
-                storage(4, true),
                 storage(5, true),
             ],
         });
@@ -53,21 +51,12 @@ impl GiIntegratePass {
             &SNIPPETS,
         );
         let pipeline_layout = pipeline_layout(device, "GI integrate", &layout);
-        let shadow_hits = crate::shadow_stream().hits;
         Self {
             answers,
             pipeline: compute(device, &module, &pipeline_layout, "gi_integrate", &[]),
             layout,
-            shadow_hits,
             cache: helio_core::gpu_cache::GpuCache::new(),
-            reads: helio_frame_api::static_names(&[
-                GI_FRAME,
-                GI_PROBES,
-                GI_LISTS,
-                GI_PENDING,
-                GI_ANSWERED,
-                shadow_hits,
-            ]),
+            reads: &[GI_FRAME, GI_PROBES, GI_LISTS, GI_PENDING, GI_ANSWERED],
         }
     }
 }
@@ -86,16 +75,15 @@ impl RenderPass for GiIntegratePass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        if !self.answers.iter().all(|a| a.complete()) {
+        if !self.answers.complete() {
             return Ok(());
         }
         let binding = |name: &str| ctx.registry.buffer_binding(name);
-        let (Some(frame), Some(probes), Some(lists), Some(pending), Some(shadows), Some(answered)) = (
+        let (Some(frame), Some(probes), Some(lists), Some(pending), Some(answered)) = (
             binding(GI_FRAME),
             binding(GI_PROBES),
             binding(GI_LISTS),
             binding(GI_PENDING),
-            binding(self.shadow_hits),
             binding(GI_ANSWERED),
         ) else {
             return Ok(());
@@ -111,7 +99,6 @@ impl RenderPass for GiIntegratePass {
                     entry(1, probes),
                     entry(2, lists),
                     entry(3, pending),
-                    entry(4, shadows),
                     entry(5, answered),
                 ],
             },

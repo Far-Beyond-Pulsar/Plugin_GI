@@ -157,15 +157,22 @@ impl SceneRays {
     }
 }
 
-/// Each pass's GPU times, and the last GPU frame read.
-type PassTimes = (Vec<(&'static str, Vec<f32>)>, Option<u64>);
+/// Each pass's GPU times, the last GPU frame read, and the frame
+/// statistics last read back.
+type PassTimes = (
+    Vec<(&'static str, Vec<f32>)>,
+    Option<u64>,
+    Option<std::sync::Arc<helio_core::StatsSnapshot>>,
+);
 
 /// `HELIO_CAPTURE=<png>`: a windowed example saves its frame number
 /// `HELIO_CAPTURE_FRAME` (default 240: probes, shadows and temporal
 /// effects settled) and exits. The surface needs [`Self::usage`]. With
 /// `HELIO_CAPTURE_TIMINGS` set it also prints each pass's median GPU time
 /// over the frames from 60 to the capture (the renderer's timing snapshot,
-/// [`Self::timings`]): frames run as the host runs them, pipelined.
+/// [`Self::timings`]): frames run as the host runs them, pipelined; and the
+/// frame statistics last read back then (rays per signal, the radiance
+/// cache's cells).
 pub struct SurfaceCapture {
     path: Option<String>,
     at: u32,
@@ -183,7 +190,7 @@ impl SurfaceCapture {
             path: std::env::var("HELIO_CAPTURE").ok(),
             at,
             frame: 0,
-            timings: std::env::var_os("HELIO_CAPTURE_TIMINGS").map(|_| (Vec::new(), None)),
+            timings: std::env::var_os("HELIO_CAPTURE_TIMINGS").map(|_| (Vec::new(), None, None)),
         }
     }
 
@@ -191,7 +198,7 @@ impl SurfaceCapture {
     /// per GPU frame that came back.
     pub fn timings(&mut self, snapshot: &helio::RenderTimingSnapshot) {
         let frame = self.frame;
-        let Some((passes, last)) = &mut self.timings else {
+        let Some((passes, last, _)) = &mut self.timings else {
             return;
         };
         if frame < 60 || snapshot.gpu_frame_index.is_none() || snapshot.gpu_frame_index == *last {
@@ -207,14 +214,24 @@ impl SurfaceCapture {
         }
     }
 
+    /// Keeps the frame statistics last read back (`Renderer::frame_stats`).
+    pub fn stats(&mut self, stats: &helio_core::FrameStats) {
+        if let Some((_, _, latest)) = &mut self.timings {
+            *latest = Some(stats.latest());
+        }
+    }
+
     fn print_timings(&mut self) {
-        let Some((passes, _)) = &mut self.timings else {
+        let Some((passes, _, stats)) = &mut self.timings else {
             return;
         };
         for (name, times) in passes.iter_mut() {
             times.sort_by(f32::total_cmp);
             let median = times[times.len() / 2];
             println!("[timings] {name} {median:.4} ms ({} frames)", times.len());
+        }
+        for (name, value) in stats.iter().flat_map(|s| s.iter()) {
+            println!("[stats] {name} {value}");
         }
     }
 
@@ -257,6 +274,7 @@ impl SurfaceCapture {
         };
         let result = renderer.render(camera, &output.texture.create_view(&Default::default()));
         self.timings(renderer.timing_snapshot());
+        self.stats(renderer.frame_stats());
         let (device, queue) = (renderer.device().clone(), renderer.queue().clone());
         if self.frame(&device, &queue, &output.texture) {
             std::process::exit(0);

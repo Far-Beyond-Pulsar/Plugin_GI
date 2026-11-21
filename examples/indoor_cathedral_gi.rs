@@ -956,6 +956,7 @@ impl AppState {
                 log::error!("Render error: {e:?}");
             }
             self.capture.timings(renderer.timing_snapshot());
+            self.capture.stats(renderer.frame_stats());
             if self
                 .capture
                 .frame(&self.device, &self.queue, &output.texture)
