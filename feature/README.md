@@ -285,7 +285,9 @@ resolve the probes). Frame contracts only (`gather.rs`, `gi_gather.wgsl`):
    with 4 neighbours' within 3 texels, balance-heuristic MIS over their
    receivers, no visibility ray; not kept), written as the denoiser's
    irradiance signal (`denoise_irradiance_add`), divided by `V` at the
-   traced pixel, the hit distance no nearer than a block's footprint.
+   traced pixel, the hit distance no nearer than a block's footprint. A
+   texel with no sample (a frame a tracer answered short with no reservoir
+   to hold, a view's first frames) writes the probes' irradiance there.
 4. The frame's denoiser (`denoise::filter`).
 5. **`GiResolvePass`** (`gi_resolve_pixels`): the filtered irradiance at each
    pixel's normal times its `V` (the near field moves the rays' estimate

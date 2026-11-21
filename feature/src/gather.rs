@@ -1011,7 +1011,7 @@ mod tests {
     #[test]
     fn the_constants_follow_their_derivations() {
         // Four independent kept samples over the denoiser's 32 frames.
-        assert!(32.0 / (M_CAP + 1.0) >= 3.5);
+        const { assert!(32.0 / (M_CAP + 1.0) >= 3.5) };
         // The spatial radius: the denoiser's two a-trous steps of 1 and 2
         // blocks.
         assert_eq!(SPATIAL_RADIUS, 1.0 + 2.0);

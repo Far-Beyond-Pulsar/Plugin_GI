@@ -386,11 +386,9 @@ fn a_light_switched_off_lowers_the_confidence() {
             .map(|p| p[0] + p[1] + p[2])
             .sum::<f32>()
             / image.iter().filter(|p| p[3] > 0.0).count().max(1) as f32;
-        if dropped.is_some() && mean < 0.1 * lit {
+        if let Some(dropped) = dropped.filter(|_| mean < 0.1 * lit) {
             eprintln!(
-                "confidence below 1/2 {} frames after the switch; the indirect diffuse under \
-                 10% of its light after {}",
-                dropped.unwrap(),
+                "confidence below 1/2 {dropped} frames after the switch; the indirect diffuse under 10% of its light after {}",
                 run.frames - switched
             );
             return;
