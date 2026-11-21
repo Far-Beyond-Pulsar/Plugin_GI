@@ -60,15 +60,16 @@ const CACHE_HISTORY: u32 = 32u;
 // Frames unused before a cell goes (`cache::EVICT_AGE`), as a histogram
 // bin: ages 128 to 255.
 const CACHE_EVICT_BIN: u32 = 8u;
-// The fold's history tests (`cache.rs`): a part's fast mean of luminance over
-// CACHE_FAST updates; an update CACHE_CHANGE mean absolute deviations off it
-// restarts the part (a jump), the fast mean CACHE_LAG deviations off the
-// value brings the value to it (a lag), once CACHE_DETECT updates measured
-// the deviation.
+// The fold's change test (`cache.rs`): a fast (CACHE_FAST updates) and a
+// slow (the history's) mean of each update's luminance, clamped from above at
+// the fast mean plus CACHE_CLAMP mean absolute deviations, apart by more than
+// CACHE_LAG deviations (and CACHE_FLOOR of the slow mean) once CACHE_DETECT
+// updates measured them, restart the part at the next update.
 const CACHE_FAST: u32 = 4u;
-const CACHE_CHANGE: f32 = 5.0;
-const CACHE_LAG: f32 = 1.5;
-const CACHE_DETECT: u32 = 4u;
+const CACHE_CLAMP: f32 = 3.0;
+const CACHE_LAG: f32 = 1.2;
+const CACHE_FLOOR: f32 = 0.05;
+const CACHE_DETECT: u32 = 8u;
 // The spread of a cell's ray (`cache::SPREAD`): the side of the solid angle
 // one of its history's rays stands for, sqrt(2 pi / (CACHE_RAYS *
 // CACHE_HISTORY)).
@@ -84,17 +85,25 @@ const PLAN_OCCUPIED: u32 = 69u;
 const PLAN_EVICTED: u32 = 70u;
 
 
-// A cell's life beside its entry (the cache's own): the frame it was last
-// lit plus one (0: never, a cell without a value: the scan and the
-// selection read lives and slots alone, never an entry's line), and each
-// part's fast mean of luminance and its updates' mean absolute deviation
-// from it. Evicting a cell clears its life.
+// A cell's life beside its entry (the cache's own), 32 bytes: the frame it
+// was last lit plus one (0: never, a cell without a value: the scan and the
+// selection read lives and slots alone, never an entry's line); a part
+// restarts at its next update (bit 0 direct, bit 1 indirect); each part's
+// change test (its fast and slow mean of clamped luminance and their mean
+// absolute deviation). Evicting a cell clears its life.
 struct CacheLife {
     lit: u32,
-    direct_fast: f32,
-    direct_deviation: f32,
-    indirect_fast: f32,
-    indirect_deviation: f32,
+    restart: u32,
+    direct: array<f32, 3>,
+    indirect: array<f32, 3>,
+}
+
+fn life_test(t: array<f32, 3>) -> vec3<f32> {
+    return vec3<f32>(t[0], t[1], t[2]);
+}
+
+fn life_row(t: vec3<f32>) -> array<f32, 3> {
+    return array<f32, 3>(t.x, t.y, t.z);
 }
 
 // Frames `age` as a histogram bin: 0 for 0, else 1 + its highest bit.
@@ -179,7 +188,7 @@ fn cache_select(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_inv
         let used = age_bin(radiance_cache_frame.origin_z.w - atomicLoad(&radiance_cache_slots[s].used));
         if used >= atomicLoad(&cache_plan[PLAN_EVICT]) {
             atomicStore(&radiance_cache_slots[s].state, 0u);
-            cache_life[s] = CacheLife(0u, 0.0, 0.0, 0.0, 0.0);
+            cache_life[s] = CacheLife(0u, 0u, array<f32, 3>(0.0, 0.0, 0.0), array<f32, 3>(0.0, 0.0, 0.0));
         } else {
             let bin = lit_bin(s);
             kind = select(select(0u, 2u, bin == take), 1u, bin > take);
@@ -257,37 +266,46 @@ fn cache_header() {
     atomicAdd(&stats[CACHE_STAT_STREAM], rays);
 }
 
-// One part's fold: value `v` over a history `n` updates long, its fast
-// mean of luminance and deviation `m`; this frame's update `s`.
+// One part's fold: its value over a history `n` updates long (0: no value
+// yet), its change test (fast, slow, deviation: `CacheLife`), whether it
+// restarts at this update; this frame's update `s`.
+//
+// The value is the plain mean of the updates since its last restart (at
+// most CACHE_HISTORY of them): weights that depend on the samples bias it
+// (a history cut short after a bright update keeps that update and weighs
+// it more; one cut after it forgets it), by a factor 2 on the heavy tails
+// of one light sample among many lamps. The change test runs on luminance
+// clamped from above (one bright update cannot move it) and only chooses to
+// restart at the next update, whose sample the test has not seen.
 struct Part {
     v: vec3<f32>,
     n: u32,
-    m: vec2<f32>,
+    test: vec3<f32>,
+    restart: bool,
 }
 
 fn fold(p: Part, s: vec3<f32>) -> Part {
     let l = bsdf_luminance(s);
-    var n = p.n;
-    var m = p.m;
-    // A jump: the part restarts at this update (its deviation kept: it
-    // measures the updates' noise, not the light).
-    if n >= CACHE_DETECT && abs(l - m.x) > CACHE_CHANGE * m.y + 0.05 * m.x + 1e-4 {
-        n = 0u;
+    if p.n == 0u {
+        return Part(s, 1u, vec3<f32>(l, l, 0.0), false);
     }
-    if n == 0u {
-        return Part(s, 1u, vec2<f32>(l, m.y));
+    if p.restart {
+        return Part(s, 1u, p.test, false);
     }
-    n = min(n + 1u, CACHE_HISTORY);
-    let deviation = m.y + (abs(l - m.x) - m.y) / f32(min(n, CACHE_HISTORY));
-    let fast = m.x + (l - m.x) / f32(min(n, CACHE_FAST));
-    var v = p.v + (s - p.v) / f32(n);
-    // A lag: the value to the fast mean, its history to the fast mean's.
-    let lv = bsdf_luminance(v);
-    if n > CACHE_FAST && abs(fast - lv) > CACHE_LAG * deviation + 0.02 * lv + 1e-4 {
-        v = select(s, v * (fast / lv), lv > 1e-6);
-        n = CACHE_FAST;
+    let n = min(p.n + 1u, CACHE_HISTORY);
+    let v = p.v + (s - p.v) / f32(n);
+    let fast = p.test.x;
+    let slow = p.test.y;
+    var dev = p.test.z;
+    let w = select(l, min(l, fast + CACHE_CLAMP * dev), n > CACHE_DETECT);
+    dev += (abs(w - fast) - dev) / f32(n);
+    let f = fast + (w - fast) / f32(min(n, CACHE_FAST));
+    let sl = slow + (w - slow) / f32(n);
+    if n > CACHE_DETECT && abs(f - sl) > CACHE_LAG * dev + CACHE_FLOOR * sl + 1e-4 {
+        // The level moved: the slow mean starts again at the fast one.
+        return Part(v, n, vec3<f32>(f, f, dev), true);
     }
-    return Part(v, n, vec2<f32>(fast, deviation));
+    return Part(v, n, vec3<f32>(f, sl, dev), false);
 }
 
 @compute @workgroup_size(64)
@@ -319,11 +337,11 @@ fn cache_fold(@builtin(global_invocation_id) id: vec3<u32>) {
     indirect *= BSDF_PI / f32(CACHE_RAYS);
     direct /= f32(CACHE_RAYS);
     let fresh = !radiance_cache_has_value(e);
-    let d = fold(Part(vec3<f32>(e.direct[0], e.direct[1], e.direct[2]), select(e.history & 0xffu, 0u, fresh), select(vec2<f32>(life.direct_fast, life.direct_deviation), vec2<f32>(0.0), fresh)), direct);
-    let n = fold(Part(vec3<f32>(e.indirect[0], e.indirect[1], e.indirect[2]), select((e.history >> 8u) & 0xffu, 0u, fresh), select(vec2<f32>(life.indirect_fast, life.indirect_deviation), vec2<f32>(0.0), fresh)), indirect);
+    let d = fold(Part(vec3<f32>(e.direct[0], e.direct[1], e.direct[2]), select(e.history & 0xffu, 0u, fresh), life_test(life.direct), (life.restart & 1u) != 0u), direct);
+    let n = fold(Part(vec3<f32>(e.indirect[0], e.indirect[1], e.indirect[2]), select((e.history >> 8u) & 0xffu, 0u, fresh), life_test(life.indirect), (life.restart & 2u) != 0u), indirect);
     radiance_cache_entries[slot].history = (radiance_cache_entries[slot].history & 0xffff0000u) | d.n | (n.n << 8u);
     radiance_cache_entries[slot].direct = array<f32, 3>(d.v.x, d.v.y, d.v.z);
     radiance_cache_entries[slot].indirect = array<f32, 3>(n.v.x, n.v.y, n.v.z);
-    cache_life[slot] = CacheLife(radiance_cache_frame.origin_z.w + 1u, d.m.x, d.m.y, n.m.x, n.m.y);
+    cache_life[slot] = CacheLife(radiance_cache_frame.origin_z.w + 1u, u32(d.restart) | (u32(n.restart) << 1u), life_row(d.test), life_row(n.test));
     atomicAdd(&stats[CACHE_STAT_LIT], 1u);
 }

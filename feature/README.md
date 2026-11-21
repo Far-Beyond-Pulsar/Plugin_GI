@@ -237,14 +237,18 @@ a pixel's gather, reflections). GI publishes it (`cache.rs`,
   after, the sky on a miss; the cell's own light sample and shadow ray a ray.
 - **The fold** (`RadianceCacheFold`, a lane a listed cell): the direct
   part's mean of its rays' light samples, the indirect part's pi times
-  their mean radiance (cosine-distributed rays), each folded into its value
-  with a history of up to 32 updates; a fast mean of the luminance over 4
-  updates and the updates' mean absolute deviation from it restart a part
-  that jumps (5 deviations) and bring a part that lags (the fast mean 1.5
-  deviations off) to the fast mean (ReBLUR's anti-lag). On a frame either
-  stream was answered short, or nothing answered, the cells hold.
+  their mean radiance (cosine-distributed rays), each folded into its value,
+  the plain mean of its updates since it last restarted (32 at most). A
+  change test (a fast mean over 4 updates and a slow one of each update's
+  luminance clamped from above at the fast mean plus 3 deviations, 1.2
+  deviations apart: 3 standard deviations of their difference) restarts a
+  part at its next update, whose sample it has not seen: weights chosen by
+  the samples themselves bias the mean (a first version, restarting at the
+  bright update that tripped it, doubled the cathedral's indirect light). On
+  a frame either stream was answered short, or nothing answered, the cells
+  hold.
 - **Settings** (`GiSettings`, host group `gi`): `radiance_cache_slots`
-  (2^12 to 2^24, default 2^18: 92 bytes a slot, 23 MiB) and
+  (2^12 to 2^24, default 2^18: 104 bytes a slot, 26 MiB) and
   `radiance_cache_rays` (default 32,768 a frame: at half the default slots'
   cells, each lit within a finest probe's period of 21 frames). The eye angle follows
   from the slots: `sqrt(4 pi * 17 / (slots / 2))`, 0.040 rad by default.
@@ -264,7 +268,7 @@ fold with its ray budget; a read with the levels it walks (one bucket of 16
 slots a level, usually one level). CPU work a frame: the probes that came in
 and the update list, four small uploads; bind groups are kept while their
 inputs stay. Memory: 6 x 24^3 probes x 288 bytes (24 MB); the cache's
-slots, entries and lives (92 bytes a slot, 23 MiB at 2^18); GI's stream's
+slots, entries and lives (104 bytes a slot, 26 MiB at 2^18); GI's stream's
 rows (80 bytes a ray, 16.5 MB), the light batch's (64 bytes a query, 4.2
 MB), the shadow stream's (48 bytes a row, 3.1 MB) and the pending light (16
 bytes a ray and 8 a cache ray, 3.6 MB). Measured: `docs/architecture/

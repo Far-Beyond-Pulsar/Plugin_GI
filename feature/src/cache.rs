@@ -26,25 +26,37 @@
 //! - [`SPREAD`]: a cell's ray stands for its share of the hemisphere over the
 //!   whole history, `sqrt(2 pi / 128)`, so its hit reads the cache at the
 //!   detail the cell's estimate resolves.
-//! - The fold keeps, beside a part's value (the mean of its last
-//!   [`HISTORY`] updates), a fast mean of its luminance over [`FAST`]
-//!   updates and the mean absolute deviation of its updates from it, and
-//!   shortens the history in two ways (ReBLUR's anti-lag, Zhdan 2021):
-//!   - **A jump**: an update [`CHANGE`] (5) deviations off the fast mean,
-//!     once [`DETECT`] updates have measured the deviation, restarts the
-//!     part at that update. 5 deviations are about 4 standard deviations of
-//!     a Gaussian part (a mean absolute deviation is 0.8 of one): a false
-//!     restart once in about 16,000 updates. A light switched off moves a
-//!     part it alone lit by its whole value.
-//!   - **A lag**: the fast mean [`LAG`] (1.5) deviations off the value
-//!     brings the value to the fast mean and the history to [`FAST`]. The
-//!     fast mean's noise is `sqrt(1 / (2 FAST - 1))` = 0.38 of an update's,
-//!     the value's `sqrt(1 / (2 HISTORY - 1))` = 0.13, together 0.40
-//!     standard deviations or 0.5 deviations: 1.5 deviations are 3 standard
-//!     deviations of their difference. It catches what moves slower than a
-//!     jump: a cell's indirect light falling a bounce at a time after a
-//!     light goes off, which the value alone would follow over its whole
-//!     history.
+//! - The fold: a part's value is the plain mean of its updates since it
+//!   last restarted, [`HISTORY`] at most. A first version shortened the
+//!   history on the samples themselves (a jump: an update far off the fast
+//!   mean restarted the part at it; a lag: the value moved to the fast
+//!   mean, ReBLUR's anti-lag). Weights that depend on the samples bias the
+//!   mean: a history restarted at a bright update keeps that update and
+//!   weighs it more. On the heavy-tailed updates of one light sample among
+//!   many lamps that doubled the cathedral's indirect light (simulated: x2.0
+//!   on a mean of four updates where 2% of samples are 50 times the rest;
+//!   x1.7 where 10% are 10 times). Now a change test only decides that the
+//!   part restarts at its next update, whose sample it has not seen, so the
+//!   value stays the plain mean of samples the decision did not choose:
+//!   - the test compares a fast mean ([`FAST`] updates) and a slow one (the
+//!     history's) of each update's luminance clamped from above at the fast
+//!     mean plus [`CLAMP`] (3) mean absolute deviations (a Gaussian update
+//!     beyond that is one in 120; one bright update of a heavy tail cannot
+//!     move the test). They are apart by more than [`LAG`] deviations: the
+//!     difference of the two means has a standard deviation of
+//!     `sqrt(1/7 + 1/63 - 2 c)` = 0.32 of an update's (`c` their covariance,
+//!     `a b / (a + b - a b)` for weights `a = 1/4`, `b = 1/32`), 0.40 mean
+//!     absolute deviations, so 1.2 is 3 standard deviations; and by
+//!     [`FLOOR`] (5%) of the slow mean, for parts with no noise at all;
+//!   - after [`DETECT`] updates (twice the fast mean's length), once the
+//!     deviation is measured.
+//!
+//!   A light switched off restarts the parts it lit within a few updates
+//!   (their luminance falls and is not clamped from below); a cell's
+//!   indirect light falling a bounce at a time restarts as each bounce's
+//!   fall shows in the fast mean. Simulated against the plain mean on
+//!   stationary samples: within 1.2% on the tails above and on Gaussian and
+//!   shadowed (Bernoulli) updates.
 //! - [`EVICT_AGE`] (128 frames): twice the longest a reader of the cache
 //!   leaves between two reads of a cell it keeps reading (a probe of GI's
 //!   coarser levels is updated every 41 frames), so no cell a reader still
@@ -75,16 +87,18 @@ pub const RAYS_PER_CELL: u32 = 4;
 pub const HISTORY: u32 = 32;
 /// The spread of a cell's ray: `sqrt(2 pi / (RAYS_PER_CELL * HISTORY))`.
 pub const SPREAD: f32 = 0.2216;
-/// Updates the fast mean of a part's luminance holds (module docs).
+/// Updates the change test's fast mean holds (module docs).
 pub const FAST: u32 = 4;
-/// An update this many mean absolute deviations off the fast mean restarts
-/// its part (module docs).
-pub const CHANGE: f32 = 5.0;
-/// The fast mean this many deviations off the value brings it there (module
-/// docs).
-pub const LAG: f32 = 1.5;
-/// Updates of history before the change tests run.
-pub const DETECT: u32 = 4;
+/// The change test clamps an update's luminance at the fast mean plus this
+/// many mean absolute deviations (module docs).
+pub const CLAMP: f32 = 3.0;
+/// The change test's fast and slow means this many deviations apart restart
+/// the part at its next update (module docs).
+pub const LAG: f32 = 1.2;
+/// ... and at least this share of the slow mean apart.
+pub const FLOOR: f32 = 0.05;
+/// Updates of history before the change test runs.
+pub const DETECT: u32 = 8;
 /// Frames unused before a cell goes.
 pub const EVICT_AGE: u32 = 128;
 /// The default slots (log2) and ray budget (rays a frame).
@@ -110,7 +124,7 @@ pub(crate) const CELL_PENDING: &str = "gi_cell_pending";
 /// Words of `cache_plan`.
 const PLAN_WORDS: u64 = 80;
 /// Bytes of a `CacheLife`.
-const LIFE_BYTES: u64 = 20;
+const LIFE_BYTES: u64 = 32;
 
 /// The cache's capacity and budget (`GiSettings`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -585,8 +599,9 @@ mod tests {
                 "CACHE_EVICT_BIN",
                 format!("{}u", EVICT_AGE.trailing_zeros() + 1),
             ),
-            ("CACHE_CHANGE", format!("{CHANGE:.1}")),
+            ("CACHE_CLAMP", format!("{CLAMP:.1}")),
             ("CACHE_LAG", format!("{LAG:.1}")),
+            ("CACHE_FLOOR", format!("{FLOOR:.2}")),
             ("CACHE_FAST", format!("{FAST}u")),
             ("CACHE_DETECT", format!("{DETECT}u")),
             ("CACHE_SPREAD", format!("{SPREAD}")),
@@ -604,11 +619,16 @@ mod tests {
 
     #[test]
     fn the_constants_follow_from_their_derivations() {
-        // The lag test's 3 standard deviations of the fast mean against the
-        // value, in mean absolute deviations (0.798 of a standard deviation).
-        let noise = |n: u32| (1.0 / (2.0 * n as f32 - 1.0)).sqrt();
-        let sigma = (noise(FAST).powi(2) + noise(HISTORY).powi(2)).sqrt();
-        assert!((3.0 * sigma / 0.798 - LAG).abs() < 0.01, "{sigma}");
+        // The change test: 3 standard deviations of the difference of the
+        // fast and the slow mean, in mean absolute deviations (0.798 of a
+        // standard deviation).
+        let (a, b) = (1.0 / FAST as f32, 1.0 / HISTORY as f32);
+        let variance = a / (2.0 - a) + b / (2.0 - b) - 2.0 * a * b / (a + b - a * b);
+        assert!(
+            (3.0 * variance.sqrt() / 0.798 - LAG).abs() < 0.03,
+            "{variance}"
+        );
+        assert_eq!(DETECT, 2 * FAST);
         // A ray's share of the hemisphere over a history.
         let spread = (2.0 * std::f32::consts::PI / (RAYS_PER_CELL * HISTORY) as f32).sqrt();
         assert!((spread - SPREAD).abs() < 1e-4, "{spread}");
@@ -630,8 +650,8 @@ mod tests {
         // each, within a finest probe's period.
         let at_load = (1u32 << DEFAULT_SLOTS_LOG2) / 2 * RAYS_PER_CELL / probe_period();
         assert_eq!(DEFAULT_RAYS, at_load.next_power_of_two(), "{at_load}");
-        // Default memory: 92 bytes a slot, 23 MiB.
-        assert_eq!(CacheConfig::default().bytes(), (1 << 18) * 92 + 8192 * 4);
+        // Default memory: 104 bytes a slot, 26 MiB.
+        assert_eq!(CacheConfig::default().bytes(), (1 << 18) * 104 + 8192 * 4);
         assert_eq!(CacheConfig::default().slots % BUCKET, 0);
     }
 
