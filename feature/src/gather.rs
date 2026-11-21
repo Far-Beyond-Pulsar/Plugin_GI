@@ -100,6 +100,14 @@ fn retrace_phase(n: u32, frame: u32) -> (u32, u32) {
     (phase, count)
 }
 
+/// What moves a point of the previous frame's space (origin `previous`)
+/// into this frame's (origin `now`): the previous origin minus this one,
+/// composed in f64 (origins are whole 1024 m steps: exact in f32 for any
+/// planet's step).
+fn rebase(previous: DVec3, now: DVec3) -> glam::Vec3 {
+    (previous - now).as_vec3()
+}
+
 /// Graph keys between the gather's passes and the resolve.
 const GATHER_FRAME: &str = "gi_gather_frame";
 const GATHER_PREVIOUS: &str = "gi_gather_previous";
@@ -449,7 +457,7 @@ impl RenderPass for GiGatherPass {
         // A point of the previous frame's space is this frame's plus the
         // origin's move back (whole 1024 m steps: exact in f32).
         let rebase = if has_previous {
-            (view.origin - ctx.world_origin).as_vec3()
+            rebase(view.origin, ctx.world_origin)
         } else {
             glam::Vec3::ZERO
         };
@@ -957,6 +965,26 @@ pub(crate) fn build(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A point keeps its world place across an origin change: frame point
+    /// `p` of the previous frame plus the rebase is the same world point in
+    /// this frame's space, exactly, an Earth's radius from the world's zero.
+    #[test]
+    fn a_rebased_point_keeps_its_world_place() {
+        let earth = 6_371_000.0f64;
+        for (previous, now) in [
+            (DVec3::ZERO, DVec3::new(1024.0, 0.0, 0.0)),
+            (
+                DVec3::new(earth - earth % 1024.0, 0.0, 0.0),
+                DVec3::new(earth - earth % 1024.0 + 1024.0, -2048.0, 1024.0),
+            ),
+        ] {
+            let p = glam::Vec3::new(3.25, -1.5, 700.125);
+            let world = previous + p.as_dvec3();
+            let moved = p + rebase(previous, now);
+            assert_eq!(now + moved.as_dvec3(), world, "{previous} -> {now}");
+        }
+    }
 
     #[test]
     fn the_retraced_texels_fill_their_rows_once() {
