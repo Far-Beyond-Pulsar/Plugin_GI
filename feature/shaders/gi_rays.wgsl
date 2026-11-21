@@ -17,6 +17,9 @@ const GI_NO_ROW: u32 = 0xffffffffu;
 // A probe ray's `GiPending::light`: its hit's light was not in the radiance
 // cache yet (the probes' own stood in).
 const GI_UNLIT: u32 = 1u;
+// ... where the cache had a cell's light for it though not one shown to hold
+// at the hit (`gi_light`'s stand-in): counted as unlit, its light kept.
+const GI_STOOD_IN: u32 = 2u;
 
 // The radiance cache's rays in GI's stream (`gi_cache.wgsl`, `cache.rs`):
 // CACHE_RAYS a lit cell, its cells' rays together, after the probes' rays
@@ -53,6 +56,20 @@ struct GiPending {
     rest: u32,
     t: f32,
     row: u32,
+}
+
+// What lighting a cache ray leaves for its cell (`gi_cell_pending`, a row a
+// cache ray): the irradiance at the cell of the ray's light sample there
+// (`light`, `scene_pack_radiance`), waiting on `row` as `GiPending`'s; the
+// light the ray's hit reflects of the cache's own (`bounced`: the hit's
+// cell's indirect light, and what passes through it from its far side),
+// which the cell folds apart from what the hit sends as it meets it
+// (`GiPending::rest` and `light`).
+struct CachePending {
+    light: u32,
+    row: u32,
+    bounced: u32,
+    pad: u32,
 }
 
 // How far a ray leaving frame point `p` starts off its surface: a few ulps

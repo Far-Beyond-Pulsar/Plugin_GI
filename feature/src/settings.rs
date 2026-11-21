@@ -18,12 +18,15 @@ pub struct GiSettings {
     /// ground sets a coarser one (1 m: 384 m).
     pub probe_spacing: Option<f32>,
     /// The radiance cache's slots, as a power of two (12 to 24), or `None`
-    /// for the default ([`DEFAULT_SLOTS_LOG2`]: 2^18, 26 MiB). A larger cache
-    /// holds finer cells (`CacheConfig::eye_angle`).
+    /// for the default ([`DEFAULT_SLOTS_LOG2`]: 2^18, 40.5 MiB). A larger
+    /// cache holds finer cells (`CacheConfig::eye_angle`); a frame's work
+    /// follows the cells in use, not the slots.
     pub cache_slots_log2: Option<u32>,
-    /// Rays a frame the radiance cache spends lighting its cells, or `None`
-    /// for the default ([`DEFAULT_RAYS`]). More rays light each cell more
-    /// often: a change of light reaches the cache sooner.
+    /// The most rays a frame the radiance cache spends lighting its cells, or
+    /// `None` for the default ([`DEFAULT_RAYS`]). It lights by need (new
+    /// cells, changed ones, a refresh, those still converging) up to this: a
+    /// larger cap converges a moving view's cells sooner; a settled scene
+    /// spends the refresh alone.
     pub cache_rays: Option<u32>,
 }
 
@@ -66,8 +69,8 @@ pub static GI: Group = Group {
             "Global Illumination",
             (0, 24),
             0,
-            "The radiance cache's slots as a power of two (12 to 24, 104 bytes a slot; a larger \
-             cache holds finer cells); 0: the default, 2^18 (26 MiB)",
+            "The radiance cache's slots as a power of two (12 to 24, about 162 bytes a slot; a \
+             larger cache holds finer cells); 0: the default, 2^18 (40.5 MiB)",
         ),
         integer(
             "radiance_cache_rays",
@@ -75,8 +78,8 @@ pub static GI: Group = Group {
             "Global Illumination",
             (0, 1 << 20),
             0,
-            "Rays a frame the radiance cache spends lighting surfaces (1024 up; more light each \
-             cell more often); 0: the default, 32768",
+            "The most rays a frame the radiance cache spends lighting surfaces, by need (1024 \
+             up; more converge a moving view's cells sooner); 0: the default, 32768",
         ),
     ],
 };

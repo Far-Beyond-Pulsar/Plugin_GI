@@ -87,10 +87,13 @@ phase, and holds the whole update:
    the hit's cell in use:
    - a probe's ray: `base * cache irradiance / pi + share * the far side's
      cache irradiance / pi + emission`, the cache's direct and indirect parts
-     both. Where the cache has no value at any level yet (a cell new this
-     frame or the last), the probes' own irradiance at the hit stands in (a
-     bounce as it was before the cache), and the ray is marked unlit;
-   - a cache ray: the same with the cache's indirect part alone, and a
+     both. Where the cache has no light for the hit within its reach (a cell
+     new this frame or the last, or one whose rays have not yet explored
+     the way to the hit), the ray is marked unlit;
+   - a cache ray: its hit's emission into `gi_pending`, and apart
+     (`gi_cell_pending`) what it reflects of the cache's indirect light there
+     (the bounced part's update; the probes' irradiance where that cell has
+     no value yet), and a
      light query at the hit (`LightQuery`: its place, the ray's footprint
      there, its normal, lit from both sides when it lets light through, its
      space) and one at its cell's point, packed into the cache's light batch
@@ -129,8 +132,12 @@ phase, and holds the whole update:
 8. **`GiIntegratePass`** (`gi_integrate.wgsl`, a workgroup a probe, a lane
    a ray): a ray's radiance is its `rest`; an inside gives nothing. A probe
    more than 1/32 of whose hits the cache could not light yet (so its
-   irradiance is off by at most that share) holds this update (a scene loading, the eye somewhere new), so it is not taught
-   a world lit by its own previous state alone. Once a probe holds light, a
+   irradiance is off by at most that share; a scene loading, the eye
+   somewhere new) holds this update (with fewer, those hits are left out
+   of the projection), so it is not taught a world lit by its
+   own previous state alone, and goes on the held list: read back without
+   waiting, it puts those probes first in the schedule a few frames later,
+   once the cache (new cells first) has lit their cells. Once a probe holds light, a
    ray's radiance is capped at 16 times the probe's mean irradiance / pi
    plus 2: a ray meeting a surface centimetres from a point light (its
    fitting) would otherwise dominate its probe for many updates
@@ -185,7 +192,7 @@ shadow stream; the integration writes `gi_probes`, the fold the cache's
 entries. The frame statistics count each stream's rays (`rays.gi`: the
 probes' on the CPU, the cache's on the GPU; `rays.radiance_cache_shadow` on
 the GPU) and the cache's own (`rays.radiance_cache`, `radiance_cache.cells`
-in use, `.new`, `.evicted`, `.lit` a frame).
+in use, `.new`, `.evicted`, `.lit` a frame, `.settled`).
 
 `GiResolvePass` runs after the integration and before deferred lighting. For
 each pixel it writes `gi_irradiance` (`gi_sample.wgsl`): irradiance / pi
@@ -207,70 +214,79 @@ darker); deferred lighting shows both as it shows `gi_irradiance`.
 
 The frame's contract (`helio_frame_api::rays::radiance_cache`, its WGSL
 `//!use frame_radiance_cache`) is the frame's: a world-space hash of
-irradiance arriving at surface cells, direct and indirect apart, read and
-marked by every ray that needs a lit hit (GI's probes and its own rays here;
-a pixel's gather, reflections). GI publishes it (`cache.rs`,
-`gi_cache.wgsl`):
+irradiance arriving at surface cells, read and marked by every ray that
+needs a lit hit (GI's probes and its own rays here; a pixel's gather,
+reflections). GI publishes it (`cache.rs`, `gi_cache.wgsl`):
 
 - **Keys** (the contract's): the world cell of the hit (64-bit counts an
   axis), its level (cells 2^-6 to 2^10 m, the coarser of the ray's
   footprint and the eye angle at its distance), the dominant side of the
   hit's face turned toward the ray, the ray's coordinate space. Hashed into
   buckets of 16 slots; a slot is its key's checksum and the frame it was
-  last marked. A cell first marked takes the marking hit's point (15 bits
-  an axis in the cell) and normal; one mark in 8 of a cell in use moves its
-  point to the marking hit, so a cell's light is gathered over the places
-  readers meet it. A mark also marks the cell three levels coarser: a new
-  fine cell's read answers from it.
-- **Each frame** (`RadianceCache`, five dispatches: two over the slots, two
-  of one invocation, one over the rays): the cells' ages into histograms of
-  powers of two of frames; evicted, the cells no reader marked for 128
-  frames and, past half the slots, the least recently used (never those
-  marked this frame or the last); listed, `rays / 4` cells at most, the
-  never lit first and then the longest unlit; 4 rays a listed cell,
-  cosine-distributed about its normal in a 2x2 stratified set from its
-  point, from no width spreading by its share of the cell's history
-  (`sqrt(2 pi / 128)`), so their hits read cells at the detail the cell's
-  estimate resolves (and at least the eye angle's), not as coarse as the
-  cell itself, which would mix a surface's parallel layers in them.
-- **Their light** (`GiLightPass`, `GiShadowPass`): a hit's light sample and
-  shadow ray, the cache's indirect irradiance at the hit for the bounces
-  after, the sky on a miss; the cell's own light sample and shadow ray a ray.
-- **The fold** (`RadianceCacheFold`, a lane a listed cell): the direct
-  part's mean of its rays' light samples, the indirect part's pi times
-  their mean radiance (cosine-distributed rays), each folded into its value,
-  the plain mean of its updates since it last restarted (32 at most). A
-  change test (a fast mean over 4 updates and a slow one of each update's
-  luminance clamped from above at the fast mean plus 3 deviations, 1.2
-  deviations apart: 3 standard deviations of their difference) restarts a
-  part at its next update, whose sample it has not seen: weights chosen by
-  the samples themselves bias the mean (a first version, restarting at the
-  bright update that tripped it, doubled the cathedral's indirect light). On
-  a frame either stream was answered short, or nothing answered, the cells
-  hold.
+  last marked. A cell first marked takes the marking hit's point and normal
+  and a place in the new cells' queue (after the slots: a quarter of them
+  a frame); one mark in 8 whose hit the cell's light holds at moves its
+  point there. A mark also marks the cell three levels coarser.
+- **Where a cell's light holds** (`radiance_cache_holds`): each cell keeps
+  how far from its point along its surface its rays found nothing in the
+  way, in 8 directions (from the rays that went low, below 45 degrees over
+  the surface: a wall standing there bounds a way, a ceiling far above does
+  not; a way no ray explored yet holds a quarter of the cell). A read whose
+  point is further than that reads the finer cell whose light holds there,
+  and a mark claims those finer cells: a cell wider than a thin wall or
+  slab beside it lights its own side only.
+- **The cells in use are a list** on the GPU (two halves, one current):
+  what the last frame kept, then the queue the marks filled. Every pass
+  walks it with indirect dispatches, so a frame's work follows the cells in
+  use and those lit, never the slots.
+- **Each frame** (`RadianceCache`: `cache_begin`, `cache_scan`,
+  `cache_plan`, `cache_select`, `cache_end`, `cache_rays`): the cells' ages
+  and needs into histograms; evicted, the cells no reader marked for 128
+  frames and, past half the slots, the least recently used; lit by need,
+  `rays / 4` cells at most: never lit, a part restarting, the refresh (each
+  cell once in 21 frames, the finest probes' period), then those still
+  converging, the least of their history first. A settled static scene
+  spends the refresh alone. 4 rays a lit cell, cosine-distributed about its
+  normal in a 2x2 set of jittered strata, from no width spreading by
+  `sqrt(2 pi / 128)`.
+- **Their light** (`GiLightPass`, `GiShadowPass`): a hit's emission (the
+  sky's radiance table on a miss) and light sample and shadow ray; apart,
+  what the hit reflects of the cache's own light (the probes' where its
+  cell has no value yet); the cell's own light sample and shadow ray a ray.
+- **The fold** (`RadianceCacheFold`, a lane a lit cell): three parts. The
+  direct (the cell's light samples) and indirect (what the hits send as
+  the rays meet them) are stationary: the plain mean of their updates
+  since they last restarted, over as many as bring the relative standard
+  error to 3%, 16 to 64. The bounced (what the hits reflect of the
+  cache's light: the later bounces) follows the cells it reads: 16
+  updates, so bounces settle in a few dozen updates. A change test (fast
+  mean of 4 updates against the history's, of clamped luminance, 4
+  standard deviations and 1% apart; the bounced part has its own) restarts a part at its next update. A
+  ray that started inside a solid (the cell's point behind a corner's other
+  surface) is left out of the update.
 - **Settings** (`GiSettings`, host group `gi`): `radiance_cache_slots`
-  (2^12 to 2^24, default 2^18: 104 bytes a slot, 26 MiB) and
-  `radiance_cache_rays` (default 32,768 a frame: at half the default slots'
-  cells, each lit within a finest probe's period of 21 frames). The eye angle follows
-  from the slots: `sqrt(4 pi * 17 / (slots / 2))`, 0.040 rad by default.
-  Where each constant comes from: `cache.rs`'s module docs.
+  (2^12 to 2^24, default 2^18: about 162 bytes a slot, 40.5 MiB) and
+  `radiance_cache_rays` (the most a frame, default 32,768). Where each
+  constant comes from: `cache.rs`'s module docs.
 
 ## Costs
 
-2720 probe updates a frame (174k probe rays) and the cache's budget (32,768
-rays, 65,536 light queries and shadow rays at most). GI's own passes are the
-generation, the cache's selection and rays, the hits' light (cache reads and
-marks, the cache rays' light queries), the cache rays' shadow rays, the
-integration and the fold; the samplers' cost is theirs, the tracers' theirs.
-What each scales with: the probes' work with the probes updated; the
-cache's selection with its slots (two passes over them a frame: 2^18 slots,
-2 MiB of slots and 5 MiB of lives read); its rays, queries, shadow rays and
-fold with its ray budget; a read with the levels it walks (one bucket of 16
-slots a level, usually one level). CPU work a frame: the probes that came in
-and the update list, four small uploads; bind groups are kept while their
-inputs stay. Memory: 6 x 24^3 probes x 288 bytes (24 MB); the cache's
-slots, entries and lives (104 bytes a slot, 26 MiB at 2^18); GI's stream's
-rows (80 bytes a ray, 16.5 MB), the light batch's (64 bytes a query, 4.2
-MB), the shadow stream's (48 bytes a row, 3.1 MB) and the pending light (16
-bytes a ray and 8 a cache ray, 3.6 MB). Measured: `docs/architecture/
-rendering.md` (Helio), section 5, "The radiance cache".
+2720 probe updates a frame (174k probe rays) and the cache's light by need
+(32,768 rays a frame at most, 65,536 light queries and shadow rays at most).
+GI's own passes are the generation, the cache's walks and rays, the hits'
+light (cache reads and marks, the cache rays' light queries), the cache
+rays' shadow rays, the integration and the fold; the samplers' cost is
+theirs, the tracers' theirs. What each scales with: the probes' work with
+the probes updated; the cache's walks with the cells in use; its rays,
+queries, shadow rays and fold with the cells lit (the cap a setting); a
+read with the levels it walks (one bucket of 16 slots a level, usually one
+level; more next to an occluder that splits a coarse cell). CPU work a
+frame: the probes that came in and the update list, four small uploads,
+the held probes' list read back without waiting; bind groups are kept while
+their inputs stay. Memory: 6 x 24^3 probes x 288 bytes (24 MB); the
+cache's slots and queue, entries, lives and lists (about 162 bytes a slot,
+40.5 MiB at 2^18); GI's stream's rows (80 bytes a ray, 16.5 MB), the light
+batch's (64 bytes a query, 4.2 MB), the shadow stream's (48 bytes a row,
+3.1 MB) and the pending light (16 bytes a ray, and 16 more a cache ray,
+3.3 MB). Measured: `docs/architecture/rendering.md` (Helio), section 5,
+"The radiance cache".

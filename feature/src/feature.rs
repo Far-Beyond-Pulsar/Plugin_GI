@@ -108,11 +108,13 @@ fn build_update(build: &mut NodeBuild<'_, '_>) -> Result<(), String> {
         crate::shadow_stream(&config.cache),
     );
     let answers = [rays, shadows].map(|s| stream::answers(build.env, &s));
+    let held = crate::integrate::Held::default();
     build.graph.add_pass(Box::new(GiPass::new(
         &device,
         config,
         &stats,
         answers[0].clone(),
+        held.clone(),
     )));
     build.graph.add_pass(Box::new(RadianceCache::new(
         &device,
@@ -132,9 +134,11 @@ fn build_update(build: &mut NodeBuild<'_, '_>) -> Result<(), String> {
         answers[1].clone(),
     )));
     stream::trace(build, &shadows)?;
-    build
-        .graph
-        .add_pass(Box::new(GiIntegratePass::new(&device, answers[0].clone())));
+    build.graph.add_pass(Box::new(GiIntegratePass::new(
+        &device,
+        answers[0].clone(),
+        held,
+    )));
     build.graph.add_pass(Box::new(RadianceCacheFold::new(
         &device,
         config.cache,

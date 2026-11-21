@@ -5,8 +5,16 @@
 //! still compiling, what it traces not drawn yet) the probes hold: rays that
 //! miss geometry a tracer knows of would teach them a world without it, and
 //! their history keeps what it is taught for many updates.
+//!
+//! A probe whose hits the cache could not light yet holds too, and goes on
+//! the held list, read back without waiting ([`Held`]): GI's schedule takes
+//! those probes first again once the list comes back, a few frames later,
+//! when the cache has lit the cells their hits made (the cache lights new
+//! cells first). A probe's first update so waits on the cache's light, not
+//! on its turn in the schedule.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use helio_core::{PassContext, RenderPass, Result as HelioResult};
 use helio_frame_api::rays::stream;
@@ -20,10 +28,37 @@ use crate::{
 pub(crate) const SNIPPETS: [helio_core::shader::ShaderSnippet; 3] =
     [stream::SNIPPET, GI_COMMON_SNIPPET, GI_RAYS_SNIPPET];
 
+/// Places of the held list: a few frames' updates (the list's way back).
+pub(crate) const HELD: u32 = 4 * MAX_UPDATES;
+
+/// The probes held for want of the cache's light, as their list comes back
+/// (module docs): GI's schedule takes them first.
+#[derive(Clone, Default)]
+pub struct Held(Arc<Mutex<Vec<u32>>>);
+
+impl Held {
+    /// The probes held since the last take.
+    pub fn take(&self) -> Vec<u32> {
+        std::mem::take(&mut *self.0.lock().unwrap_or_else(|p| p.into_inner()))
+    }
+
+    fn add(&self, probes: &[u32]) {
+        self.0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .extend_from_slice(probes);
+    }
+}
+
 /// The probes' integration (module docs).
 pub struct GiIntegratePass {
     /// GI's stream's answers.
     answers: Arc<stream::Answers>,
+    /// The held list on the GPU, its way back and where it goes.
+    held: wgpu::Buffer,
+    readbacks: helio_core::gpu_cache::ReadbackPool,
+    readback: Option<(helio_core::gpu_cache::PooledBuffer, Arc<AtomicBool>, bool)>,
+    retries: Held,
     layout: wgpu::BindGroupLayout,
     pipeline: wgpu::ComputePipeline,
     cache: helio_core::gpu_cache::GpuCache,
@@ -32,8 +67,8 @@ pub struct GiIntegratePass {
 
 impl GiIntegratePass {
     /// The pass, holding the probes on frames where `answers` (GI's
-    /// stream's) were short.
-    pub fn new(device: &wgpu::Device, answers: Arc<stream::Answers>) -> Self {
+    /// stream's) were short, its held probes back to `retries`.
+    pub fn new(device: &wgpu::Device, answers: Arc<stream::Answers>, retries: Held) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("GI integrate"),
             entries: &[
@@ -42,6 +77,7 @@ impl GiIntegratePass {
                 storage(2, true),
                 storage(3, true),
                 storage(5, true),
+                storage(6, false),
             ],
         });
         let module = helio_core::shader::module_with(
@@ -53,7 +89,24 @@ impl GiIntegratePass {
         let pipeline_layout = pipeline_layout(device, "GI integrate", &layout);
         Self {
             answers,
-            pipeline: compute(device, &module, &pipeline_layout, "gi_integrate", &[]),
+            held: crate::buffer(
+                device,
+                "GI held probes",
+                u64::from(1 + HELD) * 4,
+                wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+            ),
+            readbacks: helio_core::gpu_cache::ReadbackPool::new("GI held probes"),
+            readback: None,
+            retries,
+            pipeline: compute(
+                device,
+                &module,
+                &pipeline_layout,
+                "gi_integrate",
+                &[("GI_HELD", f64::from(HELD))],
+            ),
             layout,
             cache: helio_core::gpu_cache::GpuCache::new(),
             reads: &[GI_FRAME, GI_PROBES, GI_LISTS, GI_PENDING, GI_ANSWERED],
@@ -72,6 +125,31 @@ impl RenderPass for GiIntegratePass {
 
     fn writes(&self) -> &'static [&'static str] {
         &[GI_PROBES]
+    }
+
+    fn prepare(&mut self, _ctx: &helio_core::PrepareContext) -> HelioResult<()> {
+        // The held list copied out last frame: map it once that copy was
+        // submitted, hand its probes to the schedule once mapped.
+        if let Some((buffer, ready, mapping)) = self.readback.as_mut() {
+            if !*mapping {
+                buffer.map_read(Arc::clone(ready));
+                *mapping = true;
+            } else if ready.load(Ordering::Acquire) {
+                let words: Vec<u32> = {
+                    let view = buffer.slice(..).get_mapped_range();
+                    view.as_ref()
+                        .map(|bytes| bytemuck::cast_slice::<u8, u32>(bytes).to_vec())
+                        .unwrap_or_default()
+                };
+                if let Some((&count, probes)) = words.split_first() {
+                    let count = (count.min(HELD) as usize).min(probes.len());
+                    self.retries.add(&probes[..count]);
+                }
+                buffer.unmap();
+                self.readback = None;
+            }
+        }
+        Ok(())
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
@@ -100,6 +178,7 @@ impl RenderPass for GiIntegratePass {
                     entry(2, lists),
                     entry(3, pending),
                     entry(5, answered),
+                    entry(6, &self.held),
                 ],
             },
         );
@@ -113,6 +192,16 @@ impl RenderPass for GiIntegratePass {
         // A workgroup a probe; those past this frame's count (`GiFrame`)
         // return at once.
         pass.dispatch_workgroups(MAX_UPDATES, 1, 1);
+        drop(pass);
+        // The held list on its way back, emptied for the frames after,
+        // unless the last copy is still on its way.
+        if self.readback.is_none() {
+            let bytes = u64::from(1 + HELD) * 4;
+            let buffer = self.readbacks.get(ctx.device, bytes);
+            cmds.copy_buffer_to_buffer(&self.held, 0, &buffer, 0, bytes);
+            cmds.clear_buffer(&self.held, 0, Some(4));
+            self.readback = Some((buffer, Arc::new(AtomicBool::new(false)), false));
+        }
         Ok(())
     }
 }

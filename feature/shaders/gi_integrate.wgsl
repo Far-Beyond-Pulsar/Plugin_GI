@@ -5,10 +5,12 @@
 // workgroup a probe, a lane a ray. A ray's radiance is what `gi_light` left
 // it (`gi_pending`): its hit lit from the radiance cache, or the sky;
 // nothing from an inside. A probe more than 1/32 of whose hits the cache
-// could not light yet (its irradiance then off by at most that share) (cells new this frame or the last: a scene
-// loading, the eye somewhere new) holds this update, so it is not taught a
-// world lit by its own previous state alone. Projected on L1 harmonics and
-// blended into the probe; its distances into the probe's moments (a lane a
+// could not light yet (cells new this frame or the last: a scene loading,
+// the eye somewhere new) holds this update and goes on the held list
+// (`gi_held`), which brings it back to the schedule's front once the cache
+// has lit those cells (`integrate.rs`); with fewer, those hits are left out
+// and the rest projected. Projected on L1 harmonics and blended into the
+// probe; its distances into the probe's moments (a lane a
 // texel). A probe whose rays mostly meet insides is inside the ground (or a
 // wall). On a frame where no probe ray met anything the probes hold.
 
@@ -17,6 +19,11 @@
 @group(0) @binding(2) var<storage, read> gi_lists: array<u32>;
 @group(0) @binding(3) var<storage, read> gi_pending: array<GiPending>;
 @group(0) @binding(5) var<storage, read> gi_answered: array<u32, 4>;
+// The probes held since the list was last read back: their count, then
+// their indices (GI_HELD places; past them a held probe waits its turn).
+@group(0) @binding(6) var<storage, read_write> gi_held: array<atomic<u32>>;
+
+override GI_HELD: u32 = 0u;
 
 const PI: f32 = 3.14159265;
 const LUMINANCE: vec3<f32> = vec3<f32>(0.2126, 0.7152, 0.0722);
@@ -27,6 +34,7 @@ var<workgroup> w_t: array<f32, 64>;
 var<workgroup> w_inside: atomic<u32>;
 var<workgroup> w_hits: atomic<u32>;
 var<workgroup> w_unlit: atomic<u32>;
+var<workgroup> w_dropped: atomic<u32>;
 var<workgroup> w_hold: u32;
 var<workgroup> w_answered: u32;
 
@@ -38,6 +46,7 @@ fn gi_integrate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_
         atomicStore(&w_inside, 0u);
         atomicStore(&w_hits, 0u);
         atomicStore(&w_unlit, 0u);
+        atomicStore(&w_dropped, 0u);
     }
     // Nothing answered (no tracer has its geometry yet: a scene loading):
     // the probes keep what they hold rather than take the sky everywhere.
@@ -50,10 +59,17 @@ fn gi_integrate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_
     let pending = gi_pending[wg.x * GI_RAYS + li];
     if pending.t > 0.0 {
         atomicAdd(&w_hits, 1u);
-        if pending.light == GI_UNLIT { atomicAdd(&w_unlit, 1u); }
+        if pending.light == GI_UNLIT || pending.light == GI_STOOD_IN { atomicAdd(&w_unlit, 1u); }
+        if pending.light == GI_UNLIT { atomicAdd(&w_dropped, 1u); }
     }
     workgroupBarrier();
-    if li == 0u { w_hold = u32(atomicLoad(&w_unlit) * 32u > atomicLoad(&w_hits)); }
+    if li == 0u {
+        w_hold = u32(atomicLoad(&w_unlit) * 32u > atomicLoad(&w_hits));
+        if w_hold != 0u {
+            let k = atomicAdd(&gi_held[0], 1u);
+            if k < GI_HELD { atomicStore(&gi_held[1u + k], index); }
+        }
+    }
     if workgroupUniformLoad(&w_hold) != 0u { return; }
     var radiance = vec3<f32>(0.0);
     var t = far;
@@ -62,7 +78,10 @@ fn gi_integrate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_
         t = min(-pending.t, far);
     } else {
         if pending.t > 0.0 { t = min(pending.t, far); }
-        radiance = scene_unpack_radiance(pending.rest);
+        // A hit with nothing but the probes' own stand-in carries nothing:
+        // the projection below is over the rays that have their light (a
+        // cell's stand-in, `gi_light`'s, is kept).
+        if pending.light != GI_UNLIT { radiance = scene_unpack_radiance(pending.rest); }
     }
     // Fireflies: a ray meeting a surface a few centimetres from a point
     // light (its fitting) carries tens of times the room's light, and would
@@ -113,7 +132,7 @@ fn gi_integrate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_
     }
     // Radiance's coefficients by Monte Carlo over the sphere; irradiance /
     // pi's are theirs times 1 and 2/3 (uniform radiance 1 gives 1).
-    let scale = 4.0 * PI / f32(GI_RAYS);
+    let scale = 4.0 * PI / f32(GI_RAYS - atomicLoad(&w_dropped));
     sh[0] *= scale;
     sh[1] *= scale * (2.0 / 3.0);
     sh[2] *= scale * (2.0 / 3.0);

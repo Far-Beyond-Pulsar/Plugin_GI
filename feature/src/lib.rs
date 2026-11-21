@@ -53,7 +53,7 @@ mod light;
 pub mod settings;
 pub use cache::{CacheConfig, RadianceCache, RadianceCacheFold};
 pub use feature::GiFeature;
-pub use integrate::GiIntegratePass;
+pub use integrate::{GiIntegratePass, Held};
 pub use light::{GiLightPass, GiShadowPass};
 pub use settings::{GiSettings, GI};
 
@@ -366,6 +366,9 @@ pub struct GiPass {
     /// This frame's probe counts: updated, reset; its probes to update and
     /// those that came in.
     counts: [u32; 2],
+    /// The probes the integration held for want of the cache's light, as
+    /// their list comes back: first in the next update.
+    held: integrate::Held,
     list: Vec<u32>,
     entered: Vec<u32>,
 }
@@ -377,6 +380,7 @@ impl GiPass {
         config: GiConfig,
         stats: &helio_core::FrameStats,
         answers: std::sync::Arc<stream::Answers>,
+        held: integrate::Held,
     ) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("GI update"),
@@ -420,6 +424,7 @@ impl GiPass {
                 stream.hits,
             ]),
             counts: [0; 2],
+            held,
             list: Vec::with_capacity(MAX_UPDATES as usize),
             entered: Vec::new(),
         }
@@ -443,6 +448,9 @@ impl GiPass {
         let clipmap = Clipmap::around(eye, self.config.finest_spacing);
         clipmap.entered_into(state.clipmap.as_ref(), &mut self.entered);
         for &index in &self.entered {
+            state.schedule.enter(index);
+        }
+        for index in self.held.take() {
             state.schedule.enter(index);
         }
         state.clipmap = Some(clipmap);

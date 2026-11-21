@@ -11,14 +11,14 @@ use common::{gpu, Harness, Setup, Shape};
 use glam::{DVec3, Vec3};
 
 /// Median GPU milliseconds of each of `names` over `frames` pipelined
-/// frames after a warm-up.
-fn measure(h: &mut Harness, names: &[&str], frames: usize) -> Vec<(String, f64)> {
+/// frames after `warm` frames.
+fn measure(h: &mut Harness, names: &[&str], warm: usize, frames: usize) -> Vec<(String, f64)> {
     let device = h.gpu.device.clone();
     let mut samples: Vec<Vec<f64>> = vec![Vec::new(); names.len()];
-    for frame in 0..frames + 60 {
+    for frame in 0..frames + warm {
         h.submit();
         device.poll(wgpu::PollType::Poll).unwrap();
-        if frame < 60 {
+        if frame < warm {
             continue;
         }
         let timings = h.graph.profiler().get_gpu_timings();
@@ -97,6 +97,13 @@ fn gpu_cost_of_gi_passes() {
             common::point_light(at, 20.0, 15.0)
         })
         .collect();
+    let wide = Setup {
+        gi: helio_pass_gi::GiSettings {
+            cache_slots_log2: Some(22),
+            ..Default::default()
+        },
+        ..base.clone()
+    };
     let setups = [
         ("sun, sky", base.clone()),
         (
@@ -106,17 +113,28 @@ fn gpu_cost_of_gi_passes() {
                 ..base.clone()
             },
         ),
+        ("sun, sky, 2^22 slots", wide),
     ];
-    // Two runs of each, interleaved, so a clock change shows.
+    // Two runs of each, interleaved, so a clock change shows: the start
+    // (the cache filling, frames 60 to 360) and settled (after 3000).
     for run in 0..2 {
         for (label, setup) in &setups {
-            let mut h = Harness::pipelined(gpu, setup.clone(), shapes.clone());
-            let result = measure(&mut h, &names, 300);
-            let line: Vec<String> = result
-                .iter()
-                .map(|(name, ms)| format!("{name} {ms:.3} ms"))
-                .collect();
-            eprintln!("{label} (run {run}): {}", line.join(", "));
+            for (phase, warm) in [("start", 60), ("settled", 3000)] {
+                let mut h = Harness::pipelined(gpu, setup.clone(), shapes.clone());
+                let result = measure(&mut h, &names, warm, 300);
+                let stats = h.frame_stats();
+                let line: Vec<String> = result
+                    .iter()
+                    .map(|(name, ms)| format!("{name} {ms:.3} ms"))
+                    .collect();
+                eprintln!(
+                    "{label}, {phase} (run {run}): {}; cells {:?} settled {:?} lit {:?}",
+                    line.join(", "),
+                    stats.get("radiance_cache.cells"),
+                    stats.get("radiance_cache.settled"),
+                    stats.get("radiance_cache.lit")
+                );
+            }
         }
     }
 }

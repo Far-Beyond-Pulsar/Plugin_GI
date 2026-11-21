@@ -178,7 +178,7 @@ impl GiLightPass {
             cells: buffer(
                 device,
                 "GI cell pending light",
-                u64::from(config.cache.rays) * 8,
+                u64::from(config.cache.rays) * 16,
                 wgpu::BufferUsages::STORAGE,
             ),
             cache_cells: config.cache.cells(),

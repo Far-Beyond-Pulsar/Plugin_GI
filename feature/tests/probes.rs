@@ -126,6 +126,42 @@ fn a_glowing_room_lights_probes_evenly() {
     );
 }
 
+/// A scene's start: a grey room round the clipmap lit by a point light, so
+/// every probe hit reflects light the radiance cache has to gather first. A
+/// probe's first update holds (its hits made new cells), goes on the held
+/// list and comes back to the schedule's front once the list is read back,
+/// a few frames later, when the cache (new cells first) has lit those cells:
+/// the probes the first three frames' updates hold are updated before their
+/// turn would come round again, the finest probes' period.
+#[test]
+fn held_probes_come_back_before_their_turn() {
+    let mut setup = Setup::default();
+    let eye = setup.world_eye();
+    let light = (eye + DVec3::new(0.0, 1.0, 0.0) - setup.origin).as_vec3();
+    setup.lights = vec![common::point_light(light, 4000.0, 3000.0)];
+    let room = Shape::room(eye - 300.0, eye + 300.0, HALF);
+    let Some(mut h) = harness(setup, vec![room]) else {
+        return;
+    };
+    let start = std::time::Instant::now();
+    let mut frames = 0;
+    loop {
+        h.frames(1);
+        frames += 1;
+        let words = h.probes();
+        if updated(&words, &h.clipmap(), |_| true).len() >= 3 * MAX_UPDATES as usize {
+            break;
+        }
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(300),
+            "probes not lit within the guard"
+        );
+    }
+    let period = helio_pass_gi::cache::probe_period() as usize;
+    println!("three frames' probes updated after {frames} frames (their turn: {period})");
+    assert!(frames < period, "{frames} frames, period {period}");
+}
+
 /// A sky of radiance 1 over black ground: a probe over it sees the sky above
 /// and nothing below (irradiance / pi 1 facing up, half of it sideways, none
 /// facing down: L1 harmonics give a hemisphere's step exactly facing along

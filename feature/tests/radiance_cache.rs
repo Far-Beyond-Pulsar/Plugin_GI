@@ -12,14 +12,14 @@ use std::time::{Duration, Instant};
 use common::{gpu, CacheQuery, CacheRead, Harness, Setup, Shape};
 use glam::{DVec3, Vec3};
 use helio_frame_api::rays::stream::space_of_slot;
-use helio_pass_gi::cache::HISTORY;
+use helio_pass_gi::cache::{refresh_period, EVICT_AGE, HISTORY_MAX, HISTORY_MIN};
 use helio_pass_gi::GiSettings;
 
 const PI: f64 = std::f64::consts::PI;
 /// Base colour 128/255 (RGB8 in a surface).
 const HALF: f32 = 128.0 / 255.0;
 /// The longest a test waits for its signal.
-const GUARD: Duration = Duration::from_secs(600);
+const GUARD: Duration = Duration::from_secs(300);
 
 fn harness(setup: Setup, shapes: Vec<Shape>) -> Option<Harness> {
     Some(Harness::new(gpu()?, setup, shapes))
@@ -48,11 +48,39 @@ fn until(
     }
 }
 
-/// Every read found, its own cell's histories full.
-fn settled(reads: &[CacheRead]) -> bool {
-    reads
-        .iter()
-        .all(|r| r.level.is_some() && r.history[0] >= HISTORY && r.history[1] >= HISTORY)
+/// Every read found with at least the least history and its histories
+/// unchanged over two refresh periods: its cell is settled (its parts hold
+/// the histories their noise asks for, its bounced part's change test sees
+/// the cells it reads no longer move; only refreshes reach it, which keep
+/// them). Renders frames until then, under the wall-clock guard; the frames
+/// it took and the last reads.
+fn settle(h: &mut Harness, what: &str) -> (usize, Vec<CacheRead>) {
+    let start = Instant::now();
+    let hold = 2 * refresh_period() as usize;
+    let mut frames = 0;
+    let mut last: Vec<[u32; 2]> = Vec::new();
+    let mut still = 0;
+    loop {
+        let stats = h.frame_stats();
+        frames += 1;
+        let reads = h.cache_reads();
+        let histories: Vec<[u32; 2]> = reads.iter().map(|r| r.history).collect();
+        still = if histories == last { still + 1 } else { 0 };
+        last = histories;
+        let cells = stats.get("radiance_cache.cells").unwrap_or(0);
+        let settled = stats.get("radiance_cache.settled").unwrap_or(0);
+        let found = reads.iter().all(|r| {
+            r.level.is_some() && r.history[0] >= HISTORY_MIN && r.history[1] >= HISTORY_MIN
+        });
+        if found && still >= hold {
+            println!("{what} after {frames} frames: {settled} of {cells} cells settled");
+            return (frames, reads);
+        }
+        assert!(
+            start.elapsed() < GUARD,
+            "{what}: not after {frames} frames ({settled} of {cells} cells settled); reads {reads:?}"
+        );
+    }
 }
 
 /// The mean of each query's reads over `frames` more frames.
@@ -302,7 +330,7 @@ fn a_lit_box_converges_to_its_radiosity_solution() {
         return;
     };
     h.read_cache(b.queries.clone(), true);
-    let (frames, _) = until(&mut h, "the box's cells settle", settled);
+    let (frames, _) = settle(&mut h, "the box's cells settle");
     let reads = mean_reads(&mut h, 128);
     let truth = box_indirect(
         b.lo,
@@ -370,7 +398,7 @@ fn a_thin_wall_s_two_sides_stay_apart() {
         space: space_of_slot(0),
     };
     h.read_cache(vec![side(y + 0.05, Vec3::Y), side(y, Vec3::NEG_Y)], true);
-    let (_, reads) = until(&mut h, "both sides settle", settled);
+    let (_, reads) = settle(&mut h, "both sides settle");
     assert_eq!(reads[0].level, reads[1].level, "one level for both");
     let means = mean_reads(&mut h, 64);
     let (lit, dark) = (means[0].0 + means[0].1, means[1].0 + means[1].1);
@@ -379,16 +407,93 @@ fn a_thin_wall_s_two_sides_stay_apart() {
     assert!(dark.max_element() < 1e-4, "dark {dark}, lit {lit}");
 }
 
-/// The lit box, the light switched off once the cells settled: the time
-/// until the four points' irradiance is under 5% of what it was. The direct
-/// part restarts at its first update without the light (a jump); the
-/// indirect part falls a bounce at a time (each bounce half the last, the
-/// box's albedo), each caught by the lag test. The bound: the time a part
-/// whose history never shortened would take to fall to 5% of a step
-/// (`ln 0.05 / ln(1 - 1 / HISTORY)`, 94 updates, before the bounces' own
-/// lag), at the period a cell is updated (`cells in use / cells lit a
-/// frame` frames): the cache must forget a light faster than its history
-/// alone would.
+/// The lit box split by a wall 5 cm thick, the light on one side: the far
+/// side gets no light at all. Read on the dark side next to the wall at
+/// footprints from 1/8 m to 4 m, so each read's cell is wider than the wall
+/// and holds both sides (the lit side's cells marked by the probes' and the
+/// cache's rays, read on the lit side too): the dark reads find their own
+/// side's light, none. Twice: a wall standing on the floor (the floor's cells
+/// across it) and a slab across the box (the walls' cells across it).
+#[test]
+fn a_wall_thinner_than_its_cells_keeps_its_light_on_its_side() {
+    for vertical in [true, false] {
+        let (setup, b) = lit_box_setup(DVec3::new(1000.0, 2.0, -500.0));
+        let c = setup.world_eye();
+        // World 1001.3 to 1001.35 (or 2.3 to 2.35 up): inside a cell of
+        // every level from 1/8 m to 4 m.
+        let (wall, lit, dark, normal) = if vertical {
+            (
+                Shape::solid(
+                    DVec3::new(c.x + 1.3, b.lo.y, b.lo.z),
+                    DVec3::new(c.x + 1.35, b.hi.y, b.hi.z),
+                    HALF,
+                ),
+                DVec3::new(c.x + 1.28, b.lo.y, c.z + 0.4),
+                DVec3::new(c.x + 1.36, b.lo.y, c.z + 0.4),
+                Vec3::Y,
+            )
+        } else {
+            (
+                Shape::solid(
+                    DVec3::new(b.lo.x, c.y + 0.3, b.lo.z),
+                    DVec3::new(b.hi.x, c.y + 0.35, b.hi.z),
+                    HALF,
+                ),
+                DVec3::new(b.hi.x, c.y + 0.37, c.z + 0.4),
+                DVec3::new(b.hi.x, c.y + 0.29, c.z + 0.4),
+                Vec3::NEG_X,
+            )
+        };
+        let Some(mut h) = harness(setup, vec![Shape::room(b.lo, b.hi, HALF), wall]) else {
+            return;
+        };
+        let footprints = [0.125f32, 0.25, 0.5, 1.0, 2.0, 4.0];
+        let read = |at: DVec3, footprint: f32| CacheQuery {
+            world: at,
+            normal,
+            footprint,
+            space: space_of_slot(0),
+        };
+        let queries: Vec<CacheQuery> = footprints
+            .iter()
+            .flat_map(|&f| [read(lit, f), read(dark, f)])
+            .collect();
+        h.read_cache(queries, true);
+        settle(&mut h, "the split box settles");
+        let means = mean_reads(&mut h, 32);
+        let reads = h.cache_reads();
+        for (k, &f) in footprints.iter().enumerate() {
+            let (lit_light, dark_light) = (
+                means[2 * k].0 + means[2 * k].1,
+                means[2 * k + 1].0 + means[2 * k + 1].1,
+            );
+            println!(
+                "{} wall, footprint {f} m: lit {} (level {:?}), dark {} (level {:?})",
+                if vertical { "standing" } else { "lying" },
+                lit_light.x,
+                reads[2 * k].level,
+                dark_light.x,
+                reads[2 * k + 1].level
+            );
+            assert!(lit_light.x > 0.1, "the lit side at {f} m: {lit_light}");
+            assert!(
+                dark_light.max_element() < 1e-4,
+                "the dark side at {f} m: {dark_light} (lit {lit_light})"
+            );
+        }
+    }
+}
+
+/// The lit box, the light switched off once the cache settled: the time
+/// until the four points' irradiance is under 5% of what it was. A settled
+/// cell is updated once a refresh period; the first updates without the
+/// light move its change tests' fast means past their bound, so its parts
+/// restart and it is lit as converging until it settles again; its bounced
+/// part follows as the cells it reads restart at their own refreshes. The
+/// bound: what a part whose history never restarted would take to fall to
+/// 5% of a step at the refresh period (`ln 0.05 / ln(1 - 1 / HISTORY_MAX)`
+/// updates): the cache must forget a light faster than its history alone
+/// would.
 #[test]
 fn a_light_switched_off_leaves_the_cache_within_a_bound() {
     let (setup, b) = lit_box_setup(DVec3::new(1000.0, 2.0, -500.0));
@@ -398,15 +503,11 @@ fn a_light_switched_off_leaves_the_cache_within_a_bound() {
         return;
     };
     h.read_cache(b.queries.clone(), true);
-    until(&mut h, "the box's cells settle", settled);
+    settle(&mut h, "the box's cells settle");
     let lit: Vec<Vec3> = mean_reads(&mut h, 16)
         .iter()
         .map(|(d, i)| *d + *i)
         .collect();
-    let stats = h.frame_stats();
-    let cells = stats.get("radiance_cache.cells").unwrap_or(0);
-    let lit_a_frame = stats.get("radiance_cache.lit").unwrap_or(0).max(1);
-    let period = cells.div_ceil(lit_a_frame) as usize;
     let mut off = lights.clone();
     off[0].color_intensity[3] = 0.0;
     h.set_lights(&off);
@@ -416,11 +517,9 @@ fn a_light_switched_off_leaves_the_cache_within_a_bound() {
             .zip(&lit)
             .all(|(r, l)| r.irradiance().x < 0.05 * l.x)
     });
-    let updates = (0.05f64.ln() / (1.0 - 1.0 / f64::from(HISTORY)).ln()).ceil() as usize;
-    let bound = updates * period;
-    println!(
-        "the light left the cache in {frames} frames (bound {bound}: {cells} cells, {lit_a_frame} lit a frame); {reads:?}"
-    );
+    let updates = (0.05f64.ln() / (1.0 - 1.0 / f64::from(HISTORY_MAX)).ln()).ceil() as usize;
+    let bound = updates * refresh_period() as usize;
+    println!("the light left the cache in {frames} frames (bound {bound}); {reads:?}");
     assert!(frames <= bound, "{frames} frames, bound {bound}");
 }
 
@@ -463,7 +562,7 @@ fn an_origin_change_moves_no_entry_and_changes_no_value() {
         return;
     };
     h.read_cache(queries, true);
-    until(&mut h, "the furnace's cells settle", settled);
+    settle(&mut h, "the furnace's cells settle");
     // The cells that held still over a frame (a coarse cell's point near a
     // corner sends a few rays out of the room and keeps moving).
     let (_, held) = h.cache_rows();
@@ -476,15 +575,25 @@ fn an_origin_change_moves_no_entry_and_changes_no_value() {
     h.frames(1);
     let after = h.cache_reads();
     let (slots_after, entries_after) = h.cache_rows();
+    let now = (0..entries.len()).map(|s| slots[s].used).max().unwrap_or(0);
     let mut kept = 0;
-    for s in 0..slots.len() {
-        let still = (held[s].key, held[s].history & 0xffff, held[s].indirect)
-            == (
-                entries[s].key,
-                entries[s].history & 0xffff,
-                entries[s].indirect,
-            );
-        if slots[s].state == 0 || entries[s].history & 0xffff != 0x2020 || !still {
+    for s in 0..entries.len() {
+        let still = (
+            held[s].key,
+            held[s].history & 0xffff,
+            held[s].indirect,
+            held[s].bounced,
+        ) == (
+            entries[s].key,
+            entries[s].history & 0xffff,
+            entries[s].indirect,
+            entries[s].bounced,
+        );
+        let full = |h: u32| (h & 0xff) >= HISTORY_MIN && ((h >> 8) & 0xff) >= HISTORY_MIN;
+        // In use (marked in the last half of the eviction's age: a cell no
+        // reader marked for that long may go at the change's frame).
+        let recent = slots[s].used + EVICT_AGE / 2 > now;
+        if slots[s].state == 0 || !full(entries[s].history) || !still || !recent {
             continue;
         }
         assert_eq!(slots_after[s].state, slots[s].state, "slot {s}");
@@ -494,7 +603,11 @@ fn an_origin_change_moves_no_entry_and_changes_no_value() {
             (b.key, b.history & 0xffff),
             "slot {s}"
         );
-        assert_eq!((a.direct, a.indirect), (b.direct, b.indirect), "slot {s}");
+        assert_eq!(
+            (a.direct, a.indirect, a.bounced),
+            (b.direct, b.indirect, b.bounced),
+            "slot {s}"
+        );
         kept += 1;
     }
     assert!(kept > 4, "{kept} settled cells");
