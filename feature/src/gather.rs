@@ -296,12 +296,25 @@ impl GiGatherPass {
         rays.extend([storage(7, false), storage(8, false)]);
         let rays_layout = layout(device, "GI gather rays", &rays);
         let module = module(device);
-        let near_pipeline = compute(
+        // Its tile is written whole before it is read: no zeroing of the
+        // workgroup's memory first (naga's is one invocation's loop).
+        let near_pipeline = helio_core::shader::create_compute_pipeline(
             device,
-            &module,
-            &crate::pipeline_layout(device, "GI gather near", &near_layout),
-            "gather_near",
-            &[],
+            wgpu::ComputePipelineDescriptor {
+                label: Some("gather_near"),
+                layout: Some(&crate::pipeline_layout(
+                    device,
+                    "GI gather near",
+                    &near_layout,
+                )),
+                module: &module,
+                entry_point: Some("gather_near"),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    zero_initialize_workgroup_memory: false,
+                    ..Default::default()
+                },
+                cache: None,
+            },
         );
         let rays_pipeline = compute(
             device,

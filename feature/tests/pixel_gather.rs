@@ -416,3 +416,90 @@ fn the_near_field_shrinks_with_the_block() {
     assert!(shares[0] > shares[1] && shares[1] > shares[2], "{shares:?}");
     assert!(shares[2] < 0.05, "{shares:?}");
 }
+
+/// The gather against the probes in the lit room with a pillar: both read
+/// the same radiance cache at their rays' hits; the means of their indirect
+/// diffuse over the image and by rows (the floor, the walls) are printed and
+/// must agree within the probes' own error against the reference (r2's
+/// cathedral: within about 20% by region).
+#[test]
+fn the_gather_agrees_with_the_probes_in_a_lit_room() {
+    let mut means = Vec::new();
+    for quality in [GiQuality::Probes, GiQuality::Pixels(TraceBlock::Four)] {
+        let Some(mut run) = Run::new(quality, true, room_camera(), |w| {
+            room(w);
+        }) else {
+            return;
+        };
+        run.settle(&format!("{quality:?}"));
+        means.push(run.mean(64));
+    }
+    let band = SIZE as usize / 4;
+    let mut ratios = Vec::new();
+    for b in 0..4 {
+        let (mut p, mut g) = (0.0, 0.0);
+        for i in b * band * SIZE as usize..(b + 1) * band * SIZE as usize {
+            p += means[0][i][0] + means[0][i][1] + means[0][i][2];
+            g += means[1][i][0] + means[1][i][1] + means[1][i][2];
+        }
+        ratios.push(g / p.max(1e-9));
+    }
+    eprintln!("gather / probes by rows of the image (top to bottom): {ratios:?}");
+    for r in &ratios {
+        assert!((r - 1.0).abs() < 0.2, "{ratios:?}");
+    }
+}
+
+/// The frame's origin moving under a still scene (the camera crossing a
+/// 1024 m step: every point of the frame's space moves by 1024 m): the
+/// reservoirs rebase with it, so the indirect diffuse is disturbed no more
+/// than by the same small move of the camera within one origin.
+#[test]
+fn an_origin_change_keeps_the_reservoirs() {
+    let disturbance = |cross: bool| -> Option<f32> {
+        // The room straddles the 1024 m step in x; the eye starts 5 cm
+        // before it and moves 10 cm (across it, or not).
+        let step = 1024.0f32;
+        let start = if cross { step - 0.05 } else { step - 0.25 };
+        let camera = |x: f32| {
+            Camera::perspective_look_at(
+                Vec3::new(x, 1.7, 3.0),
+                Vec3::new(x + 3.0, 1.0, -1.0),
+                Vec3::Y,
+                1.0,
+                1.0,
+                0.1,
+                100.0,
+            )
+        };
+        let mut run = Run::new(
+            GiQuality::Pixels(TraceBlock::Four),
+            true,
+            camera(start),
+            |w| {
+                mesh_scene::room_at(w, Vec3::new(step, 0.0, 0.0));
+            },
+        )?;
+        run.settle("before");
+        let before = run.mean(16);
+        run.camera = camera(start + 0.1);
+        let after = run.mean(4);
+        let (mut diff, mut total) = (0.0, 0.0);
+        for (a, b) in before.iter().zip(&after) {
+            for c in 0..3 {
+                diff += (a[c] - b[c]).abs();
+                total += a[c];
+            }
+        }
+        Some(diff / total.max(1e-9))
+    };
+    let (Some(crossing), Some(within)) = (disturbance(true), disturbance(false)) else {
+        return;
+    };
+    eprintln!("the indirect diffuse moved by {crossing:.4} across the origin's step, {within:.4} within it");
+    // Twice the move within one origin, and the half floats' noise.
+    assert!(
+        crossing <= 2.0 * within + 0.01,
+        "{crossing} against {within}"
+    );
+}

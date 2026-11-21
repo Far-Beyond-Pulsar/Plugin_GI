@@ -177,18 +177,33 @@ fn traced_pixel(b: vec2<u32>) -> vec2<u32> {
 
 // ── The near field ──────────────────────────────────────────────────────────
 
+// The largest block side (`TraceBlock::Sixteen`): the near field's search
+// reaches this many pixels from its own.
+const NEAR_REACH: i32 = 4;
+// A workgroup's 8x8 pixels and NEAR_REACH around them: their frame points
+// (w 0: no surface or past the image), read once a workgroup.
+const NEAR_TILE: i32 = 16;
+var<workgroup> near_tile: array<vec4<f32>, 256>;
+var<workgroup> near_origin: vec2<i32>;
+
+// The frame point at pixel `q` (within NEAR_REACH of the workgroup's
+// pixels), from the tile.
+fn tile_at(q: vec2<i32>) -> vec4<f32> {
+    let t = q - near_origin + NEAR_REACH;
+    return near_tile[t.y * NEAR_TILE + t.x];
+}
+
 // The surface's geometric normal at pixel `q` (frame point `x`), from its
 // neighbours' points: on each axis the nearer of the two one-sided
 // differences (a depth edge's far side says nothing of this surface),
 // turned toward the eye. A shading normal (normal maps) would count the
 // surface's own plane as an occluder.
 fn geometric_normal(q: vec2<i32>, x: vec3<f32>) -> vec3<f32> {
-    let size = vec2<i32>(internal_size());
     var d: array<vec3<f32>, 2>;
     for (var axis = 0u; axis < 2u; axis++) {
         let step = select(vec2<i32>(0, 1), vec2<i32>(1, 0), axis == 0u);
-        let a = position_at(clamp(q + step, vec2<i32>(0), size - 1));
-        let b = position_at(clamp(q - step, vec2<i32>(0), size - 1));
+        let a = tile_at(q + step);
+        let b = tile_at(q - step);
         let da = select(vec3<f32>(1e30), a.xyz - x, a.w > 0.0);
         let db = select(vec3<f32>(1e30), x - b.xyz, b.w > 0.0);
         d[axis] = select(db, da, dot(da, da) < dot(db, db));
@@ -220,7 +235,7 @@ fn horizon(p: vec2<i32>, x: vec3<f32>, n: vec3<f32>, r: f32, steps: i32) -> f32 
             for (var j = 1; j <= steps; j++) {
                 let q = p + vec2<i32>(round(dir * f32(s * j)));
                 if any(q < vec2<i32>(0)) || any(q >= size) { break; }
-                let o = position_at(q);
+                let o = tile_at(q);
                 if o.w == 0.0 { continue; }
                 let v = o.xyz - x;
                 let distance = length(v);
@@ -243,10 +258,22 @@ fn near_floor() -> f32 {
 }
 
 @compute @workgroup_size(8, 8)
-fn gather_near(@builtin(global_invocation_id) id: vec3<u32>) {
+fn gather_near(@builtin(global_invocation_id) id: vec3<u32>, @builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    // The tile: four points a lane.
+    let origin = vec2<i32>(group.xy * 8u);
+    let size = vec2<i32>(internal_size());
+    if li == 0u { near_origin = origin; }
+    for (var k = 0u; k < 4u; k++) {
+        let t = i32(li + 64u * k);
+        let q = origin - NEAR_REACH + vec2<i32>(t % NEAR_TILE, t / NEAR_TILE);
+        var point = vec4<f32>(0.0);
+        if all(q >= vec2<i32>(0)) && all(q < size) { point = position_at(q); }
+        near_tile[t] = point;
+    }
+    workgroupBarrier();
     if any(id.xy >= internal_size()) { return; }
     let p = vec2<i32>(id.xy);
-    let at = position_at(p);
+    let at = tile_at(p);
     if at.w == 0.0 {
         textureStore(near_out, p, vec4<f32>(1.0, 1.0, 0.0, 0.0));
         return;
@@ -395,12 +422,29 @@ fn answer(row: u32) -> Answer {
 // `n`: for a point, the cosines at both ends over the distance squared (area
 // measure); for the sky, the receiver's cosine (solid angle).
 fn geometry(x: vec3<f32>, n: vec3<f32>, r: GatherReservoir) -> f32 {
-    if (r.flags & RESERVOIR_SKY) != 0u { return max(dot(n, r.sample), 0.0); }
-    let v = r.sample - x;
+    return point_geometry(x, n, sample_point(r));
+}
+
+// A sample unpacked: its point (or the sky's direction) and normal (zero
+// for the sky).
+struct SamplePoint {
+    at: vec3<f32>,
+    normal: vec3<f32>,
+}
+
+fn sample_point(r: GatherReservoir) -> SamplePoint {
+    if (r.flags & RESERVOIR_SKY) != 0u { return SamplePoint(r.sample, vec3<f32>(0.0)); }
+    return SamplePoint(r.sample, scene_unpack_unit(r.sample_normal));
+}
+
+// `geometry` of an unpacked sample.
+fn point_geometry(x: vec3<f32>, n: vec3<f32>, y: SamplePoint) -> f32 {
+    if all(y.normal == vec3<f32>(0.0)) { return max(dot(n, y.at), 0.0); }
+    let v = y.at - x;
     let d2 = max(dot(v, v), 1e-12);
     let w = v * inverseSqrt(d2);
     let cos_x = dot(n, w);
-    let cos_y = -dot(scene_unpack_unit(r.sample_normal), w);
+    let cos_y = -dot(y.normal, w);
     if cos_x <= 0.0 || cos_y <= 0.0 { return 0.0; }
     return cos_x * cos_y / d2;
 }
@@ -634,10 +678,13 @@ fn gather_spatial(@builtin(global_invocation_id) id: vec3<u32>) {
     let n = scene_unpack_unit(own.receiver_normal);
     let footprint = footprint_at(x);
     // The domains: this texel's temporal reservoir, then its neighbours'
-    // that are the same surface within the radius.
+    // that are the same surface within the radius; their receivers' normals
+    // and their samples' unpacked once.
     var domains: array<GatherReservoir, 5>;
+    var normals: array<vec3<f32>, 5>;
     var count = 1u;
     domains[0] = own;
+    normals[0] = n;
     if (gather.info.z & GATHER_REUSE) != 0u {
         let reach = (gather.reuse.w * f32(side()) * 1.41421356 + 1.0) * footprint;
         for (var k = 0u; k < GATHER_NEIGHBOURS; k++) {
@@ -645,8 +692,10 @@ fn gather_spatial(@builtin(global_invocation_id) id: vec3<u32>) {
             if any(q < vec2<i32>(0)) || any(q >= vec2<i32>(traced)) || all(q == b) { continue; }
             let r = reservoirs[u32(q.y) * traced.x + u32(q.x)];
             if (r.flags & RESERVOIR_VALID) == 0u || r.m <= 0.0 { continue; }
-            if !same_surface(x, n, r.receiver, scene_unpack_unit(r.receiver_normal), footprint, reach) { continue; }
+            let nq = scene_unpack_unit(r.receiver_normal);
+            if !same_surface(x, n, r.receiver, nq, footprint, reach) { continue; }
             domains[count] = r;
+            normals[count] = nq;
             count += 1u;
         }
     }
@@ -660,13 +709,15 @@ fn gather_spatial(@builtin(global_invocation_id) id: vec3<u32>) {
     var aim = 0.0;
     for (var k = 0u; k < count; k++) {
         let r = domains[k];
-        let own_g = geometry(r.receiver, scene_unpack_unit(r.receiver_normal), r);
+        let y = sample_point(r);
+        var own_g = 0.0;
         var all_g = 0.0;
         for (var j = 0u; j < count; j++) {
-            let d = domains[j];
-            all_g += d.m * geometry(d.receiver, scene_unpack_unit(d.receiver_normal), r);
+            let g = point_geometry(domains[j].receiver, normals[j], y);
+            all_g += domains[j].m * g;
+            if j == k { own_g = g; }
         }
-        let pc = luminance(scene_unpack_radiance(r.radiance)) * geometry(x, n, r);
+        let pc = luminance(scene_unpack_radiance(r.radiance)) * point_geometry(x, n, y);
         let w = select(0.0, r.m * own_g / all_g, all_g > 0.0) * pc * r.weight;
         sum += w;
         if choice(i, 11u + k) * sum < w {

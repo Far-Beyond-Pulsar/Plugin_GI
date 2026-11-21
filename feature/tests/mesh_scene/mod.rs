@@ -121,48 +121,57 @@ pub fn room_light(intensity: f32) -> LightComponent {
 
 /// A room (floor, walls, ceiling: boxes) with a pillar and a point light.
 pub fn room(world: &mut pulsar_scenedb::World) -> pulsar_scenedb::Entity {
+    room_at(world, Vec3::ZERO)
+}
+
+/// [`room`] moved by `offset`.
+pub fn room_at(world: &mut pulsar_scenedb::World, offset: Vec3) -> pulsar_scenedb::Entity {
     let light = world.spawn();
-    world.insert(light, room_light(20.0));
+    let mut row = room_light(20.0);
+    row.position_range[0] += offset.x;
+    row.position_range[1] += offset.y;
+    row.position_range[2] += offset.z;
+    world.insert(light, row);
     let white = [0.7; 3];
     spawn_box(
         world,
-        Vec3::new(0.0, -0.25, 0.0),
+        offset + Vec3::new(0.0, -0.25, 0.0),
         Vec3::new(5.0, 0.25, 5.0),
         white,
     );
     spawn_box(
         world,
-        Vec3::new(0.0, 4.25, 0.0),
+        offset + Vec3::new(0.0, 4.25, 0.0),
         Vec3::new(5.0, 0.25, 5.0),
         white,
     );
     spawn_box(
         world,
-        Vec3::new(-5.25, 2.0, 0.0),
+        offset + Vec3::new(-5.25, 2.0, 0.0),
         Vec3::new(0.25, 2.5, 5.0),
         [0.7, 0.1, 0.1],
     );
     spawn_box(
         world,
-        Vec3::new(5.25, 2.0, 0.0),
+        offset + Vec3::new(5.25, 2.0, 0.0),
         Vec3::new(0.25, 2.5, 5.0),
         [0.1, 0.7, 0.1],
     );
     spawn_box(
         world,
-        Vec3::new(0.0, 2.0, -5.25),
+        offset + Vec3::new(0.0, 2.0, -5.25),
         Vec3::new(5.0, 2.5, 0.25),
         white,
     );
     spawn_box(
         world,
-        Vec3::new(0.0, 2.0, 5.25),
+        offset + Vec3::new(0.0, 2.0, 5.25),
         Vec3::new(5.0, 2.5, 0.25),
         white,
     );
     spawn_box(
         world,
-        Vec3::new(1.5, 1.0, -1.0),
+        offset + Vec3::new(1.5, 1.0, -1.0),
         Vec3::new(0.4, 1.0, 0.4),
         white,
     );
