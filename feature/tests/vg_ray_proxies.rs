@@ -420,17 +420,10 @@ impl Harness {
         let mut scene = scene_db(&device, &queue);
         let runtime = VgRuntime::default();
         build(&mut scene.world, &runtime);
-        // What these tests check is the probes' and the cache's rays
-        // through the proxies: GI resolves the probes alone, so no pixel's
-        // ray marks cells (with the pixels' gather, a coarse cell straddling
-        // the VG wall's foot is claimed on its lit side first: the cache's
-        // thin-occluder open item, rendering.md section 5, measured there).
-        let config = RendererConfig::new(64, 64, wgpu::TextureFormat::Rgba8Unorm).with_feature(
-            helio_pass_gi::GiSettings {
-                quality: helio_pass_gi::GiQuality::Probes,
-                ..Default::default()
-            },
-        );
+        // GI at its default quality: the probes', the cache's and the
+        // pixels' rays through the proxies.
+        let config = RendererConfig::new(64, 64, wgpu::TextureFormat::Rgba8Unorm)
+            .with_feature(helio_pass_gi::GiSettings::default());
         let renderer =
             RendererBuilder::new(config.clone(), scene.world.gpu_mirror().cloned().unwrap())
                 .with_graph(helio_mesh_host::presets::with(
