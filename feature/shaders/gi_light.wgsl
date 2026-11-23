@@ -155,7 +155,7 @@ fn gi_light(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
                 let n = s.normal;
                 let footprint = width + spread * hit.t;
                 let through = surface_transmission(s);
-                let lit = gi_hit_light(at, dir, surface, footprint, space, !probe);
+                let lit = gi_hit_light(at, dir, surface, footprint, space, !probe, true);
                 rest = lit.rgb;
                 let answered = lit.w > 0.0;
                 if probe && !answered { pending.light = GI_UNLIT; }
@@ -216,17 +216,6 @@ fn gi_light_header() {
     atomicStore(&light_header[2], 1u);
 }
 
-// A shadow ray from frame point `p` (already off its surface) toward a light
-// sample: `distance` away (a directional light: as far as GI's rays reach),
-// as wide as `width` with no spread (it stands for that patch of surface).
-fn shadow_ray(p: vec3<f32>, sample: LightSample, width: f32, space: u32) -> SceneRay {
-    let off = gi_ray_offset(p);
-    let distance = light_sample_distance(sample);
-    let reach = select(max(distance - 2.0 * off, 1e-4), GI_RAY_REACH, distance >= LIGHT_SAMPLE_FAR);
-    let cone = scene_cone_in_space(scene_ray_cone(width, 0.0, RAY_MASK_ALL), space);
-    return SceneRay(p, reach, light_sample_dir(sample), cone);
-}
-
 // A workgroup of 64 cache rays.
 @compute @workgroup_size(64)
 fn gi_shadow(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
@@ -253,32 +242,13 @@ fn gi_shadow(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_ind
         if pending.row != GI_NO_ROW {
             let sample = light_samples[pending.row];
             pending.row = GI_NO_ROW;
-            if light_sample_found(sample) {
-                let hit = ray_hits[row];
-                let surface = ray_surfaces[row];
-                let s = scene_surface_unpack(surface);
-                let face = scene_surface_face(surface);
-                let towards = light_sample_dir(sample);
-                let radiance = light_sample_radiance(sample);
-                let through = surface_transmission(s);
-                // Lambertian on the side the light is on; from behind, the
-                // surface's share of it through.
-                let cosine = dot(s.normal, towards);
-                var light = vec3<f32>(0.0);
-                var side = face;
-                if cosine > 0.0 {
-                    light = s.albedo.rgb * radiance * cosine / PI;
-                } else if any(through > vec3<f32>(0.0)) && cosine < 0.0 {
-                    light = through * radiance * -cosine / PI;
-                    side = -face;
-                }
-                if any(light > vec3<f32>(0.0)) {
-                    let p = ray.origin + ray.dir * hit.t;
-                    first_ray = shadow_ray(p + side * gi_ray_offset(p), sample, scene_ray_footprint(ray, hit.t), space);
-                    pending.light = scene_pack_radiance(light);
-                    pending.row = 0u;
-                    count = 1u;
-                }
+            let direct = gi_hit_direct(ray_surfaces[row], sample);
+            if direct.lit {
+                let p = ray.origin + ray.dir * ray_hits[row].t;
+                first_ray = gi_shadow_ray(p + direct.side * gi_ray_offset(p), sample, scene_ray_footprint(ray, ray_hits[row].t), space);
+                pending.light = scene_pack_radiance(direct.light);
+                pending.row = 0u;
+                count = 1u;
             }
         }
         if cell.y != GI_NO_ROW {
@@ -290,7 +260,7 @@ fn gi_shadow(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_ind
                 let e = light_sample_radiance(sample) * max(dot(n, light_sample_dir(sample)), 0.0);
                 if any(e > vec3<f32>(0.0)) {
                     // As wide as the cell it stands for.
-                    let shadow = shadow_ray(ray.origin, sample, radiance_cache_size(entry.key.tag & 31u), space);
+                    let shadow = gi_shadow_ray(ray.origin, sample, radiance_cache_size(entry.key.tag & 31u), space);
                     if count == 0u { first_ray = shadow; } else { second_ray = shadow; }
                     cell.x = scene_pack_radiance(e);
                     cell.y = count;

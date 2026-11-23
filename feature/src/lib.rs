@@ -55,7 +55,10 @@ mod light;
 pub mod settings;
 pub use cache::{CacheConfig, RadianceCache, RadianceCacheFold};
 pub use feature::GiFeature;
-pub use gather::{GatherConfig, GiGatherPass, GiGatherShadePass};
+pub use gather::{
+    GatherConfig, GiGatherHitsPass, GiGatherPass, GiGatherShadePass, GiGatherShadowPass,
+    GiGatherSignalPass,
+};
 pub use integrate::GiIntegratePass;
 pub use light::{GiLightPass, GiShadowPass};
 pub use settings::{GiQuality, GiSettings, GI};

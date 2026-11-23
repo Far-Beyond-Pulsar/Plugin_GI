@@ -15,10 +15,13 @@ use helio::{
 };
 use helio_frame_api::denoise::TraceBlock;
 use helio_mesh_host::ray_tracing::SceneDbRayTracing;
-use helio_pass_gi::{GiGatherPass, GiGatherShadePass, GiQuality, GiResolvePass, GiSettings};
+use helio_pass_gi::{GiGatherPass, GiGatherSignalPass, GiQuality, GiResolvePass, GiSettings};
 
 mod mesh_scene;
-use mesh_scene::{adapter, furnace, indirect, read, read_texture, room, room_light, scene_db};
+use mesh_scene::{
+    adapter, furnace, indirect, read, read_texture, room, room_light, scene_db, spawn_box,
+    spawn_glowing_box,
+};
 
 const SIZE: u32 = 64;
 /// How long any wait may take.
@@ -135,7 +138,7 @@ impl Run {
     }
 
     fn signal(&self) -> Option<[Vec<f32>; 2]> {
-        let pass = self.renderer.find_pass::<GiGatherShadePass>()?;
+        let pass = self.renderer.find_pass::<GiGatherSignalPass>()?;
         let [a, b] = pass.signal_textures()?;
         Some([
             read_texture(&self.device, &self.queue, a),
@@ -189,6 +192,38 @@ impl Run {
         }
     }
 
+    /// Renders until the mean luminance of the indirect diffuse over 64
+    /// frames moves by less than 0.5% from the 64 before (a scene whose
+    /// frames are noisy and whose cache warms slowly, one plain ray a block
+    /// in a mostly dark room lit by bounces, settles on its means rather than
+    /// on single frames).
+    fn settle_means(&mut self, what: &str) -> f32 {
+        let start = Instant::now();
+        let mut history: Vec<f32> = Vec::new();
+        loop {
+            assert!(start.elapsed() < GUARD, "{what}: did not settle");
+            self.frame();
+            let Some(image) = self.indirect() else {
+                continue;
+            };
+            let lit: Vec<f32> = image
+                .iter()
+                .filter(|p| p[3] > 0.0)
+                .map(|p| p[0] + p[1] + p[2])
+                .collect();
+            history.push(lit.iter().sum::<f32>() / lit.len().max(1) as f32);
+            if history.len() >= 128 {
+                let n = history.len();
+                let last = history[n - 64..].iter().sum::<f32>() / 64.0;
+                let before = history[n - 128..n - 64].iter().sum::<f32>() / 64.0;
+                if last > 0.0 && (last - before).abs() <= 0.005 * last {
+                    eprintln!("{what}: settled after {} frames at {last}", self.frames);
+                    return last;
+                }
+            }
+        }
+    }
+
     /// The per-pixel mean of the indirect diffuse over `frames` frames.
     fn mean(&mut self, frames: usize) -> Vec<[f32; 4]> {
         // The internal resolution's pixels (the renderer's render scale).
@@ -234,8 +269,9 @@ fn room_camera() -> Camera {
 /// A furnace (a closed box of albedo 1/2 glowing with radiance 1): the light
 /// arriving anywhere is pi times the radiance everywhere, 1 / (1 - 1/2) = 2,
 /// so the indirect diffuse (irradiance / pi) is 2 at every pixel, at every
-/// quality. Checked where the near field is open (its corners' transfer is
-/// the AO approximation's, reported).
+/// quality. Checked where the near field leaves the block whole (a block
+/// with an occluded pixel moves light between its pixels by the AO
+/// approximation, reported).
 #[test]
 fn a_glowing_box_s_indirect_diffuse_is_its_radiance_at_every_quality() {
     for quality in [
@@ -256,7 +292,7 @@ fn a_glowing_box_s_indirect_diffuse_is_its_radiance_at_every_quality() {
                 .near_field()
                 .unwrap()
                 .chunks(4)
-                .map(|v| v[1] >= 0.999)
+                .map(|v| v[0] >= 0.999)
                 .collect(),
         };
         let (mut sum, mut error, mut count, mut corner, mut corners) = (0.0, 0.0, 0, 0.0, 0);
@@ -292,8 +328,8 @@ fn a_glowing_box_s_indirect_diffuse_is_its_radiance_at_every_quality() {
     }
 }
 
-/// The reservoirs (temporal and spatial reuse, no visibility ray between
-/// neighbours) against one plain cosine-distributed ray a pixel, both
+/// The reservoirs (temporal and spatial reuse, a visibility ray to a sample
+/// another receiver took) against one plain cosine-distributed ray a pixel, both
 /// accumulated over many frames at a ray a pixel, in a lit room with a
 /// pillar: their means agree (the reuse's bias), tile by tile.
 #[test]
@@ -339,6 +375,110 @@ fn the_reservoirs_agree_with_one_plain_ray_a_pixel() {
     eprintln!("reuse / plain: whole image {ratio:.4}, worst 8x8 tile {worst:.4}");
     assert!((ratio - 1.0).abs() < 0.05, "{ratio}");
     assert!(worst < 0.15, "{worst}");
+}
+
+/// Reuse across an occluder: a room halved by a wall to half its height, a
+/// glowing panel on one side, the camera above the wall seeing the floor on
+/// both sides of it. The floor's pixels on the far side neighbour pixels
+/// that see the panel, on the same plane: reuse without visibility would
+/// hand them samples of the panel. With reuse they take no more light than
+/// one plain ray a pixel gives them (what reaches them over the wall, off
+/// the ceiling), and the near side the same as it does.
+#[test]
+fn reuse_does_not_carry_light_through_an_occluder() {
+    let mut means = Vec::new();
+    for reuse in [false, true] {
+        let Some(mut run) = Run::new(
+            GiQuality::Pixels(TraceBlock::Four),
+            reuse,
+            Camera::perspective_look_at(
+                Vec3::new(0.0, 4.5, 4.0),
+                Vec3::new(0.0, 0.0, -1.5),
+                Vec3::Y,
+                1.2,
+                1.0,
+                0.1,
+                100.0,
+            ),
+            |w| {
+                let dark = [0.05; 3];
+                for (centre, half, colour) in [
+                    (
+                        Vec3::new(0.0, -0.25, 0.0),
+                        Vec3::new(5.0, 0.25, 5.0),
+                        [0.7; 3],
+                    ),
+                    (Vec3::new(0.0, 5.25, 0.0), Vec3::new(5.0, 0.25, 5.0), dark),
+                    (Vec3::new(-5.25, 2.5, 0.0), Vec3::new(0.25, 2.5, 5.0), dark),
+                    (Vec3::new(5.25, 2.5, 0.0), Vec3::new(0.25, 2.5, 5.0), dark),
+                    (Vec3::new(0.0, 2.5, -5.25), Vec3::new(5.0, 2.5, 0.25), dark),
+                    (Vec3::new(0.0, 2.5, 5.25), Vec3::new(5.0, 2.5, 0.25), dark),
+                    // The occluder: the wall at x = 0, half the room's height.
+                    (
+                        Vec3::new(0.0, 1.25, 0.0),
+                        Vec3::new(0.05, 1.25, 5.0),
+                        [0.7; 3],
+                    ),
+                ] {
+                    spawn_box(w, centre, half, colour);
+                }
+                // A glowing panel low on the far wall of one side: below the
+                // occluder's top seen from the other side's floor, and wide
+                // (a small emitter's few hits a frame keep the image from
+                // settling).
+                spawn_glowing_box(
+                    w,
+                    Vec3::new(-4.9, 1.25, -1.0),
+                    Vec3::new(0.05, 1.0, 3.0),
+                    [0.5; 3],
+                    5.0,
+                );
+            },
+        ) else {
+            return;
+        };
+        run.settle_means(if reuse { "reuse" } else { "plain" });
+        means.push(run.mean(512));
+    }
+    // The camera looks along -z from above the wall: +x (the dark side) is
+    // the image's right half, the wall its middle column. The dark side's
+    // floor within the spatial reach of the wall (3 texels of 4 pixels: 12
+    // pixels), past the wall's own pixels; and the lit side's alike.
+    let width = (means[0].len() as f64).sqrt() as usize;
+    let centre = width / 2;
+    let band = |side: i32| -> [f32; 2] {
+        let mut sums = [0.0f32; 2];
+        for y in width / 3..width {
+            for k in 2..(width / 4).min(12) {
+                let x = (centre as i32 + side * k as i32) as usize;
+                for (sum, mean) in sums.iter_mut().zip(&means) {
+                    let p = mean[y * width + x];
+                    *sum += p[0] + p[1] + p[2];
+                }
+            }
+        }
+        sums
+    };
+    let [dark_plain, dark_reuse] = band(1);
+    let [lit_plain, lit_reuse] = band(-1);
+    eprintln!(
+        "dark side: plain {dark_plain:.3}, reuse {dark_reuse:.3} ({:.4}); lit side: plain          {lit_plain:.3}, reuse {lit_reuse:.3} ({:.4})",
+        dark_reuse / dark_plain,
+        lit_reuse / lit_plain
+    );
+    // The far side is darker than the near one by far (the scene does
+    // occlude); reuse carries none of the near side's light to it (without
+    // the visibility ray it read 1.59 of the plain rays there) and leaves the
+    // near side as the plain rays do. The far side's band holds about 2% of
+    // the near side's light and its plain mean moves by 10-15% between runs
+    // over 128 frames (512 here): what reuse does there below the plain rays
+    // is reported, not bounded.
+    assert!(dark_plain < 0.25 * lit_plain, "{dark_plain} {lit_plain}");
+    assert!(dark_reuse < 1.15 * dark_plain, "{dark_reuse} {dark_plain}");
+    assert!(
+        (lit_reuse / lit_plain - 1.0).abs() < 0.10,
+        "{lit_reuse} {lit_plain}"
+    );
 }
 
 /// A light switched off: the re-traced samples find their light gone and
@@ -398,7 +538,8 @@ fn a_light_switched_off_lowers_the_confidence() {
 
 /// The near field reaches a block's footprint and no farther: the share of
 /// pixels it darkens shrinks with the block, and traced at every pixel it
-/// all but vanishes (a pixel's own neighbours only).
+/// vanishes (nothing to move light between). It never changes a block's
+/// mean: its factors average 1 over each block's pixels.
 #[test]
 fn the_near_field_shrinks_with_the_block() {
     let mut shares = Vec::new();
@@ -409,6 +550,30 @@ fn the_near_field_shrinks_with_the_block() {
             return;
         };
         let near = run.until("the near field", |run| run.near_field());
+        let width = (near.len() as f64 / 4.0).sqrt() as usize;
+        let side = block.side() as usize;
+        let mut worst = 0.0f32;
+        for by in 0..width / side {
+            for bx in 0..width / side {
+                let (mut sum, mut count) = (0.0f32, 0.0f32);
+                for y in 0..side {
+                    for x in 0..side {
+                        let i = ((by * side + y) * width + bx * side + x) * 4;
+                        // The sky's pixels hold 1, as the block's mean.
+                        sum += near[i + 1];
+                        count += 1.0;
+                    }
+                }
+                if count > 0.0 {
+                    worst = worst.max((sum / count - 1.0).abs());
+                }
+            }
+        }
+        // Half floats: 2^-10 relative.
+        assert!(
+            worst < 4e-3,
+            "{block:?}: a block's factors average 1 + {worst}"
+        );
         let shaded = near.chunks(4).filter(|v| v[1] < 0.999).count();
         let share = shaded as f32 / (near.len() / 4) as f32;
         let least = near.chunks(4).map(|v| v[1]).fold(1.0f32, f32::min);

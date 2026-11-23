@@ -5,6 +5,7 @@
 //!use frame_ray_surface
 //!use frame_surface
 //!use frame_bsdf
+//!use frame_light_samples
 //!use frame_radiance_cache
 //!use frame_history
 //!use frame_denoise_irradiance
@@ -13,29 +14,42 @@
 //!use gi_rays
 //!use gi_hit
 // Indirect diffuse at a pixel (README.md, "The pixels' gather"): one ray a
-// block of internal pixels, its hit lit from the radiance cache (`gi_hit`),
-// kept in a reservoir a traced texel and reused across frames and
-// neighbours (ReSTIR GI, Ouyang et al. 2021), into the frame's denoiser's
-// irradiance signal, demodulated by the near field.
+// block of internal pixels, its hit lit as GI lights a hit (`gi_hit`), kept
+// in a reservoir a traced texel and reused across frames and neighbours
+// (ReSTIR GI, Ouyang et al. 2021), into the frame's denoiser's irradiance
+// signal, demodulated by the near field.
 //
 // - `gather_near` (a pixel): the near field. Occlusion nearer than a block's
 //   footprint is not in one ray a block; a horizon search over that
 //   footprint and no farther gives it at every pixel (V), and the signal is
-//   divided by V at its traced pixel and multiplied by it at each pixel
-//   (`gi_resolve_pixels`), so the rays' estimate is exact where it was traced
-//   and the near field moves it between the pixels of a block. A surface
-//   whose occlusion is its own (`gbuffer_own_occlusion`: a traced terrain's
-//   short sky rays, a meadow's) brings its V in its material occlusion, which
-//   the lighting multiplies in itself.
+//   divided by V at its traced pixel and multiplied by the same V at each
+//   pixel (`gi_resolve_pixels`), so the rays' estimate is exact where it was
+//   traced and the near field moves it between the pixels of a block. A
+//   surface whose occlusion is its own (`gbuffer_own_occlusion`: a traced
+//   terrain's short sky rays, a meadow's) brings its V in its material
+//   occlusion, which the lighting multiplies in itself.
 // - `gather_rays` (a texel): its traced pixel's ray (cosine about the
 //   pixel's normal) into the stream `gi_pixels`, and for one reservoir in
 //   GATHER period, a ray re-tracing its kept sample.
+// - `gather_hits` (a texel): its ray's hit lit from the radiance cache where
+//   the cell is no wider than the ray is long (a cell wider than that
+//   averages light the hit does not see: the floor beyond a contact, the
+//   lit side of a thin wall); elsewhere the cell's indirect part, read
+//   without claiming the cell, and a light query for the hit's own direct
+//   light (`gi_pixels` light batch).
+// - `gather_shadow` (a query): its light sample's light at the hit, waiting
+//   on a shadow ray (`gi_pixels_shadow`).
 // - `gather_validate` (a texel): a re-traced sample's light now; a sample
 //   whose light changed lowers the confidence written for the denoiser.
 // - `gather_temporal` (a texel): this frame's sample combined with the
 //   reservoir where the traced pixel was last frame (`frame_history`).
 // - `gather_spatial` (a texel): that combined with neighbours' (not kept:
-//   only the temporal reservoirs carry over), resolved to the signal.
+//   only the temporal reservoirs carry over); a visibility ray from the
+//   receiver to the sample it chose, where that sample came from another
+//   receiver (`gi_pixels_visibility`).
+// - `gather_signal` (a texel): the chosen sample's estimate where the
+//   receiver sees it (this frame's own sample where it does not), into the
+//   signal.
 
 // The frame (`GatherFrame`, gather.rs).
 struct GatherFrame {
@@ -45,41 +59,77 @@ struct GatherFrame {
     // the denoiser's); z: GATHER_* flags; w: the camera's coordinate space
     // (`SceneRay::space`).
     info: vec4<u32>,
-    // xyz: what moves a point of the previous frame's space into this
-    // frame's (the previous origin minus this one); w: a pixel's width a
-    // metre of view depth.
-    rebase: vec4<f32>,
     // x: the most samples' worth (M) a reservoir keeps; y: one reservoir in
     // this many is re-traced a frame; z: this frame's re-traced phase; w:
     // the spatial neighbours' radius in texels.
     reuse: vec4<f32>,
-    // The camera's forward axis (view depth is along it).
+    // xyz: the camera's forward axis (view depth is along it); w: a pixel's
+    // width a metre of view depth.
     forward: vec4<f32>,
+    // xyz: this frame's eye (frame space; reservoirs hold their receivers
+    // from it).
+    eye: vec4<f32>,
+    // xyz: the previous frame's eye in this frame's space (moved by the
+    // origin's change).
+    previous_eye: vec4<f32>,
 }
 
 const GATHER_HAS_PREVIOUS: u32 = 1u;
 const GATHER_REUSE: u32 = 2u;
 const GATHER_TAGS: u32 = 4u;
 
-// A traced texel's reservoir, 48 bytes: the receiver (the traced pixel's
-// surface, frame space) and its normal; the kept sample (a hit's point and
-// the normal of the side the ray met, or for the sky a unit direction), the
-// light it sends to the receiver (`scene_pack_radiance`), its unbiased
-// contribution weight W (area measure for a point, solid angle for the
-// sky) and how many samples' worth it holds (M).
+// A traced texel's reservoir, 32 bytes (`RESERVOIR_BYTES`): the receiver
+// (the traced pixel's surface) as its distance from the eye (0: none) and
+// direction (16:16 octahedral), its normal (8:8) and the luminance of the
+// cache's light at the sample when it was taken (a half: what a re-trace
+// compares); the kept sample as a direction from the receiver (16:16) and a
+// distance (below 0: the sky), its normal (8:8, the side the ray met) and
+// how many samples' worth the reservoir holds (M, a half); the light it
+// sends to the receiver (`scene_pack_radiance`) and its unbiased
+// contribution weight W (area measure for a point, solid angle for the sky).
 struct GatherReservoir {
-    receiver: vec3<f32>,
-    receiver_normal: u32,
-    sample: vec3<f32>,
-    sample_normal: u32,
+    receiver_distance: f32,
+    receiver_dir: u32,
+    receiver_normal_y: u32,
+    sample_dir: u32,
+    sample_t: f32,
+    sample_normal_m: u32,
     radiance: u32,
     weight: f32,
-    m: f32,
-    flags: u32,
 }
 
-const RESERVOIR_VALID: u32 = 1u;
-const RESERVOIR_SKY: u32 = 2u;
+// A reservoir unpacked.
+struct Res {
+    valid: bool,
+    sky: bool,
+    receiver: vec3<f32>,
+    normal: vec3<f32>,
+    // The sample's point, or the sky's direction.
+    sample: vec3<f32>,
+    sample_normal: vec3<f32>,
+    m: f32,
+    cache_y: f32,
+    radiance: u32,
+    weight: f32,
+}
+
+// A texel's light at its ray's hit (`gather_hits`, `gather_shadow`): the
+// light it sends back but for its direct light where it has its own
+// (`rest`, packed), that direct light waiting on a shadow ray (`light`,
+// packed; `row` the shadow stream's row, GATHER_NONE: none), the luminance
+// of the cache's whole light at the hit (`cache_y`, what a re-trace
+// compares).
+struct GatherHitLight {
+    rest: u32,
+    light: u32,
+    row: u32,
+    cache_y: f32,
+}
+
+const GATHER_NONE: u32 = 0xffffffffu;
+// `texels[i].w` bits: the texel's temporal reservoir holds this frame's own
+// sample (traced from this receiver: no visibility ray needed).
+const TEXEL_OWN_KEPT: u32 = 1u;
 
 // A hit distance the denoiser takes as none (a half float's largest).
 const GATHER_NO_HIT: f32 = 65504.0;
@@ -116,7 +166,7 @@ const NEAR_SLICES: u32 = 4u;
 @group(0) @binding(9) var<storage, read_write> reservoirs: array<GatherReservoir>;
 // A texel's: x this frame's ray's hit distance (GATHER_NO_HIT: none), y the
 // confidence its previous reservoir's re-trace left (1 where none ran), z
-// the confidence of what its temporal reservoir took.
+// the confidence of what its temporal reservoir took, w TEXEL_* bits.
 @group(0) @binding(10) var<storage, read_write> texels: array<vec4<f32>>;
 @group(0) @binding(11) var<storage, read> hits: array<SceneHit>;
 @group(0) @binding(12) var<storage, read> surfaces: array<SceneSurface>;
@@ -124,7 +174,8 @@ const NEAR_SLICES: u32 = 4u;
 @group(0) @binding(14) var history_pixels: texture_2d<f32>;
 @group(0) @binding(15) var signal0: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(16) var signal1: texture_storage_2d<rgba16float, write>;
-// x: every tracer answered the stream in full this frame.
+// Whether every tracer answered in full this frame: x the stream
+// `gi_pixels`, y its shadow rays, z its visibility rays.
 @group(0) @binding(17) var<uniform> gather_answer: vec4<u32>;
 @group(0) @binding(18) var<uniform> frame_gi: GiFrame;
 @group(0) @binding(19) var<storage, read> gi_probes: array<u32>;
@@ -135,6 +186,29 @@ const NEAR_SLICES: u32 = 4u;
 @group(0) @binding(24) var<storage, read_write> radiance_cache_slots: array<RadianceCacheSlot>;
 @group(0) @binding(25) var<storage, read_write> radiance_cache_entries: array<RadianceCacheEntry>;
 @group(0) @binding(26) var<storage, read> rays_in: array<SceneRay>;
+// The light batch `gi_pixels`: its count (from 0), its queries, the
+// samples the samplers left.
+@group(0) @binding(27) var<storage, read_write> light_header: array<atomic<u32>, 4>;
+@group(0) @binding(28) var<storage, read_write> light_queries: array<LightQuery>;
+@group(0) @binding(29) var<storage, read> light_samples: array<LightSample>;
+@group(0) @binding(30) var<storage, read_write> hit_light: array<GatherHitLight>;
+// The shadow stream `gi_pixels_shadow`: rows from 0, the count in its
+// header; read back after its tracers (34).
+@group(0) @binding(31) var<storage, read_write> shadow_rays: array<SceneRay>;
+@group(0) @binding(32) var<storage, read_write> shadow_hits: array<SceneHit>;
+@group(0) @binding(33) var<storage, read_write> shadow_header: array<atomic<u32>, 4>;
+@group(0) @binding(34) var<storage, read> shadow_answers: array<SceneHit>;
+// A texel's chosen sample (`gather_spatial`): its irradiance estimate (rgb)
+// and its direction (w, a packed unit).
+@group(0) @binding(35) var<storage, read_write> picks: array<vec4<f32>>;
+// The visibility stream `gi_pixels_visibility`: a texel's ray at its index
+// (no ray where its chosen sample is its own), read back after its tracers
+// (37).
+@group(0) @binding(36) var<storage, read_write> visibility_rays: array<SceneRay>;
+@group(0) @binding(37) var<storage, read> visibility_answers: array<SceneHit>;
+// The frame's statistics: the shadow stream's count (`rays.gi_pixels_shadow`).
+@group(0) @binding(38) var<storage, read_write> stats: array<atomic<u32>>;
+override GATHER_SHADOW_STAT: u32 = 0u;
 
 fn internal_size() -> vec2<u32> {
     return gather.size.xy;
@@ -160,7 +234,7 @@ fn position_at(q: vec2<i32>) -> vec4<f32> {
 // A pixel's width at frame point `x` (its view depth times the pixel's
 // angle).
 fn footprint_at(x: vec3<f32>) -> f32 {
-    return gather.rebase.w * max(dot(x - cameras[0].position_near.xyz, gather.forward.xyz), 0.0);
+    return gather.forward.w * max(dot(x - gather.eye.xyz, gather.forward.xyz), 0.0);
 }
 
 // Whether the surface at pixel `q` was drawn through a remap (a portal's
@@ -173,6 +247,76 @@ fn remapped(q: vec2<i32>) -> bool {
 // The texel traced at internal pixel `p`'s block this frame.
 fn traced_pixel(b: vec2<u32>) -> vec2<u32> {
     return denoise_traced_pixel(b, gather.info.y, side(), internal_size());
+}
+
+// ── Reservoirs ──────────────────────────────────────────────────────────────
+
+// A unit vector in 16 bits (8:8): the top 8 bits an axis of
+// `scene_pack_unit`'s, rounded.
+fn pack_unit8(n: vec3<f32>) -> u32 {
+    let p = scene_pack_unit(n);
+    let x = min(((p & 0xffffu) + 128u) >> 8u, 255u);
+    let y = min(((p >> 16u) + 128u) >> 8u, 255u);
+    return x | (y << 8u);
+}
+
+fn unpack_unit8(p: u32) -> vec3<f32> {
+    return scene_unpack_unit(((p & 0xffu) * 257u) | ((((p >> 8u) & 0xffu) * 257u) << 16u));
+}
+
+fn half_bits(v: f32) -> u32 {
+    return pack2x16float(vec2<f32>(v, 0.0)) & 0xffffu;
+}
+
+fn half_value(b: u32) -> f32 {
+    return unpack2x16float(b & 0xffffu).x;
+}
+
+// `r` unpacked, its receiver held from eye `eye`.
+fn res_unpack(r: GatherReservoir, eye: vec3<f32>) -> Res {
+    var x: Res;
+    x.valid = r.receiver_distance > 0.0;
+    if !x.valid { return x; }
+    x.receiver = eye + scene_unpack_unit(r.receiver_dir) * r.receiver_distance;
+    x.normal = unpack_unit8(r.receiver_normal_y);
+    x.cache_y = half_value(r.receiver_normal_y >> 16u);
+    let d = scene_unpack_unit(r.sample_dir);
+    x.sky = r.sample_t < 0.0;
+    x.sample = select(x.receiver + d * r.sample_t, d, x.sky);
+    x.sample_normal = select(unpack_unit8(r.sample_normal_m), vec3<f32>(0.0), x.sky);
+    x.m = half_value(r.sample_normal_m >> 16u);
+    x.radiance = r.radiance;
+    x.weight = r.weight;
+    return x;
+}
+
+// `x` packed, its receiver held from eye `eye`.
+fn res_pack(x: Res, eye: vec3<f32>) -> GatherReservoir {
+    var r: GatherReservoir;
+    if !x.valid { return r; }
+    let v = x.receiver - eye;
+    let distance = length(v);
+    r.receiver_distance = max(distance, 1e-30);
+    r.receiver_dir = scene_pack_unit(v / max(distance, 1e-30));
+    r.receiver_normal_y = pack_unit8(x.normal) | (half_bits(x.cache_y) << 16u);
+    if x.sky {
+        r.sample_dir = scene_pack_unit(x.sample);
+        r.sample_t = -1.0;
+    } else {
+        let s = x.sample - x.receiver;
+        let t = length(s);
+        r.sample_dir = scene_pack_unit(s / max(t, 1e-30));
+        r.sample_t = t;
+    }
+    r.sample_normal_m = select(pack_unit8(x.sample_normal), 0u, x.sky) | (half_bits(x.m) << 16u);
+    r.radiance = x.radiance;
+    r.weight = x.weight;
+    return r;
+}
+
+fn no_res() -> Res {
+    var x: Res;
+    return x;
 }
 
 // ── The near field ──────────────────────────────────────────────────────────
@@ -248,17 +392,12 @@ fn horizon(p: vec2<i32>, x: vec3<f32>, n: vec3<f32>, r: f32, steps: i32) -> f32 
     return open / f32(2u * NEAR_SLICES);
 }
 
-// The least V the near field takes: the search cannot resolve an opening
-// narrower than a pixel, and a pit a pixel wide and a block deep leaves
-// (1 / (2 side))^2 of the hemisphere open; below that the division would
-// only amplify what the search cannot measure.
-fn near_floor() -> f32 {
-    let s = 2.0 * f32(side());
-    return 1.0 / (s * s);
-}
+// A workgroup's pixels' V (below 0: no surface), for their blocks' means
+// (a block's side, 1, 2 or 4, divides the workgroup's 8).
+var<workgroup> near_v: array<f32, 64>;
 
 @compute @workgroup_size(8, 8)
-fn gather_near(@builtin(global_invocation_id) id: vec3<u32>, @builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+fn gather_near(@builtin(global_invocation_id) id: vec3<u32>, @builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_index) li: u32, @builtin(local_invocation_id) local: vec3<u32>) {
     // The tile: four points a lane.
     let origin = vec2<i32>(group.xy * 8u);
     let size = vec2<i32>(internal_size());
@@ -271,30 +410,58 @@ fn gather_near(@builtin(global_invocation_id) id: vec3<u32>, @builtin(workgroup_
         near_tile[t] = point;
     }
     workgroupBarrier();
-    if any(id.xy >= internal_size()) { return; }
     let p = vec2<i32>(id.xy);
-    let at = tile_at(p);
+    let inside = all(id.xy < internal_size());
+    var at = vec4<f32>(0.0);
+    if inside { at = tile_at(p); }
+    // This pixel's V, and what the lighting multiplies in itself (the
+    // material occlusion where the occlusion is the surface's own: a traced
+    // terrain's short sky rays, a meadow's).
+    var v = -1.0;
+    var own = 1.0;
+    if at.w > 0.0 {
+        v = 1.0;
+        if (gather.info.z & GATHER_TAGS) != 0u && gbuffer_own_occlusion(textureLoad(surface_tags, p, 0).xy) {
+            own = textureLoad(gbuf_orm, p, 0).r;
+            v = own;
+        } else {
+            let n = geometric_normal(p, at.xyz);
+            if any(n != vec3<f32>(0.0)) {
+                // A block's footprint at the pixel: what one ray a block
+                // misses.
+                let r = f32(side()) * footprint_at(at.xyz);
+                v = horizon(p, at.xyz, n, r, i32(side()));
+            }
+        }
+    }
+    near_v[li] = v;
+    workgroupBarrier();
+    if !inside { return; }
     if at.w == 0.0 {
         textureStore(near_out, p, vec4<f32>(1.0, 1.0, 0.0, 0.0));
         return;
     }
-    let floor_v = near_floor();
-    if (gather.info.z & GATHER_TAGS) != 0u && gbuffer_own_occlusion(textureLoad(surface_tags, p, 0).xy) {
-        // Its occlusion is its own: the material occlusion the lighting
-        // multiplies in itself is its V.
-        let ao = textureLoad(gbuf_orm, p, 0).r;
-        let v = max(ao, floor_v);
-        textureStore(near_out, p, vec4<f32>(v, v / max(ao, 1e-4), 0.0, 0.0));
-        return;
+    // The block's mean V over its pixels that hold a surface: the rays'
+    // estimate (its traced pixel any of them, `denoise_traced_pixel`) is the
+    // block's mean light, and each pixel takes its V's share of it, so the
+    // near field moves light between a block's pixels and never changes
+    // their mean (a ray that meets a near occluder sends its light, which a
+    // division by the traced pixel's V would count again).
+    let b = (local.xy / side()) * side();
+    var sum = 0.0;
+    var count = 0.0;
+    for (var y = 0u; y < side(); y++) {
+        for (var x = 0u; x < side(); x++) {
+            let w = near_v[(b.y + y) * 8u + b.x + x];
+            if w >= 0.0 {
+                sum += w;
+                count += 1.0;
+            }
+        }
     }
-    var v = 1.0;
-    let n = geometric_normal(p, at.xyz);
-    if any(n != vec3<f32>(0.0)) {
-        // A block's footprint at the pixel: what one ray a block misses.
-        let r = f32(side()) * footprint_at(at.xyz);
-        v = max(horizon(p, at.xyz, n, r, i32(side())), floor_v);
-    }
-    textureStore(near_out, p, vec4<f32>(v, v, 0.0, 0.0));
+    let mean = sum / max(count, 1.0);
+    let share = select(1.0, v / mean, mean > 0.0);
+    textureStore(near_out, p, vec4<f32>(mean, share / max(own, 1e-4), 0.0, 0.0));
 }
 
 // ── Rays ────────────────────────────────────────────────────────────────────
@@ -316,11 +483,17 @@ fn cosine_about(n: vec3<f32>, u: vec2<f32>) -> vec3<f32> {
     return normalize(bsdf_to_world(frame, bsdf_cosine_direction(u)));
 }
 
-// A ray leaving frame point `x` (normal `n`, a pixel `width` wide there)
-// along `dir`: off the surface by `gi_ray_offset`, as wide as the pixel,
-// spreading as one of the rays the denoiser's history accumulates
-// (GI_RAY_SPREAD: sqrt(2 pi / 32), a 32-frame history's share of the
-// hemisphere).
+// A ray leaving frame point `x` (normal `n`) along `dir` for the block of
+// pixels it stands for: off the surface by `gi_ray_offset`, as wide as the
+// block's footprint there (`block_width`), spreading as one of the rays the
+// denoiser's history accumulates (GI_RAY_SPREAD: sqrt(2 pi / 32), a 32-frame
+// history's share of the hemisphere). Its footprint at a hit,
+// `width + spread t`, is the patch the estimate stands for: the cache's cell
+// it reads and the terrain's level a tracer may stop at.
+fn block_width(x: vec3<f32>) -> f32 {
+    return f32(side()) * footprint_at(x);
+}
+
 fn leaving(x: vec3<f32>, n: vec3<f32>, width: f32, dir: vec3<f32>) -> SceneRay {
     let cone = scene_cone_in_space(scene_ray_cone(width, GI_RAY_SPREAD, RAY_MASK_ALL), gather.info.w);
     return SceneRay(x + n * gi_ray_offset(x), GI_RAY_REACH, dir, cone);
@@ -353,22 +526,16 @@ fn gather_rays(@builtin(global_invocation_id) id: vec3<u32>) {
     if at.w > 0.0 && !remapped(p) {
         let n = helio_gbuffer_normal(textureLoad(gbuf_normal, p, 0).xyz);
         let dir = cosine_about(n, texel_sample(i, gather.info.y, 0u));
-        ray = leaving(at.xyz, n, footprint_at(at.xyz), dir);
+        ray = leaving(at.xyz, n, block_width(at.xyz), dir);
     }
     rays[i] = ray;
     if retraced(i) {
         var check = no_ray();
-        let r = previous[i];
-        if (gather.info.z & GATHER_HAS_PREVIOUS) != 0u && (r.flags & RESERVOIR_VALID) != 0u {
+        let r = res_unpack(previous[i], gather.previous_eye.xyz);
+        if (gather.info.z & GATHER_HAS_PREVIOUS) != 0u && r.valid {
             // Along the kept sample again, from where it was taken.
-            let x = r.receiver + gather.rebase.xyz;
-            let n = scene_unpack_unit(r.receiver_normal);
-            let o = x + n * gi_ray_offset(x);
-            var dir = r.sample;
-            if (r.flags & RESERVOIR_SKY) == 0u {
-                dir = normalize(r.sample + gather.rebase.xyz - o);
-            }
-            check = leaving(x, n, footprint_at(x), dir);
+            let o = r.receiver + r.normal * gi_ray_offset(r.receiver);
+            check = leaving(r.receiver, r.normal, block_width(r.receiver), toward(o, r));
         }
         rays[retrace_row(i)] = check;
     }
@@ -380,51 +547,6 @@ fn luminance(c: vec3<f32>) -> f32 {
     return bsdf_luminance(c);
 }
 
-// A ray's answer: the light back along it (rgb), and in w the hit distance
-// (0: a miss, below 0: an inside); `point` and `normal` the hit's (the side
-// the ray met).
-struct Answer {
-    light: vec3<f32>,
-    t: f32,
-    point: vec3<f32>,
-    normal: vec3<f32>,
-}
-
-fn answer(row: u32) -> Answer {
-    let ray = rays_in[row];
-    let hit = hits[row];
-    let eye = gi_trace.eye.xyz;
-    var a: Answer;
-    if hit.t <= 0.0 {
-        a.light = gi_sky_radiance((ray.origin - eye) * 0.001, ray.dir);
-        a.normal = ray.dir;
-        return a;
-    }
-    a.point = ray.origin + ray.dir * hit.t;
-    if scene_hit_inside(hit) {
-        // The ray started inside something: no light reaches the receiver
-        // that way.
-        a.t = -hit.t;
-        a.normal = -ray.dir;
-        return a;
-    }
-    a.t = hit.t;
-    let surface = surfaces[row];
-    let face = scene_surface_face(surface);
-    a.normal = select(face, -face, dot(face, ray.dir) > 0.0);
-    let footprint = scene_ray_footprint(ray, hit.t);
-    let space = scene_ray_space(ray);
-    a.light = gi_hit_light(a.point - eye, ray.dir, surface, footprint, space, false).rgb;
-    return a;
-}
-
-// The geometry term of `r`'s sample seen from a receiver at `x` with normal
-// `n`: for a point, the cosines at both ends over the distance squared (area
-// measure); for the sky, the receiver's cosine (solid angle).
-fn geometry(x: vec3<f32>, n: vec3<f32>, r: GatherReservoir) -> f32 {
-    return point_geometry(x, n, sample_point(r));
-}
-
 // A sample unpacked: its point (or the sky's direction) and normal (zero
 // for the sky).
 struct SamplePoint {
@@ -432,12 +554,13 @@ struct SamplePoint {
     normal: vec3<f32>,
 }
 
-fn sample_point(r: GatherReservoir) -> SamplePoint {
-    if (r.flags & RESERVOIR_SKY) != 0u { return SamplePoint(r.sample, vec3<f32>(0.0)); }
-    return SamplePoint(r.sample, scene_unpack_unit(r.sample_normal));
+fn sample_point(r: Res) -> SamplePoint {
+    return SamplePoint(r.sample, select(r.sample_normal, vec3<f32>(0.0), r.sky));
 }
 
-// `geometry` of an unpacked sample.
+// The geometry term of a sample `y` seen from a receiver at `x` with normal
+// `n`: for a point, the cosines at both ends over the distance squared (area
+// measure); for the sky, the receiver's cosine (solid angle).
 fn point_geometry(x: vec3<f32>, n: vec3<f32>, y: SamplePoint) -> f32 {
     if all(y.normal == vec3<f32>(0.0)) { return max(dot(n, y.at), 0.0); }
     let v = y.at - x;
@@ -449,22 +572,14 @@ fn point_geometry(x: vec3<f32>, n: vec3<f32>, y: SamplePoint) -> f32 {
     return cos_x * cos_y / d2;
 }
 
+fn geometry(x: vec3<f32>, n: vec3<f32>, r: Res) -> f32 {
+    return point_geometry(x, n, sample_point(r));
+}
+
 // The unit direction from `x` toward `r`'s sample.
-fn toward(x: vec3<f32>, r: GatherReservoir) -> vec3<f32> {
-    if (r.flags & RESERVOIR_SKY) != 0u { return r.sample; }
+fn toward(x: vec3<f32>, r: Res) -> vec3<f32> {
+    if r.sky { return r.sample; }
     return normalize(r.sample - x);
-}
-
-// `r` with its points moved into this frame's space.
-fn rebased(r: GatherReservoir) -> GatherReservoir {
-    var out = r;
-    out.receiver += gather.rebase.xyz;
-    if (r.flags & RESERVOIR_SKY) == 0u { out.sample += gather.rebase.xyz; }
-    return out;
-}
-
-fn invalid_reservoir() -> GatherReservoir {
-    return GatherReservoir(vec3<f32>(0.0), 0u, vec3<f32>(0.0), 0u, 0u, 0.0, 0.0, 0u);
 }
 
 // Whether a reservoir received at `q` (normal `nq`) serves a receiver at `x`
@@ -479,6 +594,29 @@ fn same_surface(x: vec3<f32>, n: vec3<f32>, q: vec3<f32>, nq: vec3<f32>, footpri
     return d <= reach && dot(n, nq) >= 0.75 && abs(dot(n, q - x)) <= 0.378 * d + footprint;
 }
 
+// Whether the depth buffer shows nothing between receivers `xa` (at internal
+// pixel `a`) and `xb` (at `b`): along the screen's segment between them, no
+// surface nearer the eye than the straight line between the two points by
+// more than a quarter of their separation and two pixels' footprint. A
+// neighbour on the same plane across an occluder (a floor's two sides of a
+// wall) fails: its samples are what the occluder hides from this receiver,
+// which the resampling's weights (geometry terms, no visibility) do not see.
+fn seen_between(a: vec2<i32>, b: vec2<i32>, xa: vec3<f32>, xb: vec3<f32>) -> bool {
+    let d = b - a;
+    let steps = max(abs(d.x), abs(d.y));
+    let tolerance = 0.25 * distance(xa, xb);
+    for (var k = 1; k < steps; k++) {
+        let u = f32(k) / f32(steps);
+        let q = a + vec2<i32>(round(vec2<f32>(d) * u));
+        let o = position_at(q);
+        if o.w == 0.0 { continue; }
+        let line = mix(xa, xb, u);
+        let nearer = dot(line - o.xyz, gather.forward.xyz);
+        if nearer > tolerance + 2.0 * footprint_at(line) { return false; }
+    }
+    return true;
+}
+
 // How far from its receiver a reservoir's receiver may be and still be the
 // same place's: a block's diagonal (the traced pixel anywhere in the
 // previous block) and a pixel (the reprojection's rounding).
@@ -486,11 +624,196 @@ fn block_reach(footprint: f32) -> f32 {
     return (1.41421356 * f32(side()) + 1.0) * footprint;
 }
 
+// Whether the cache's cell at a hit `t` along a ray of footprint
+// `footprint` there may stand for the hit's light: no wider than the ray is
+// long. A wider cell (the cache's eye angle sets a read's level where the
+// ray's footprint is finer) averages light over surfaces the hit does not
+// see from where it is: the lit wall above a contact, the far side of a
+// thin wall.
+fn trusted(p: vec3<f32>, footprint: f32, t: f32) -> bool {
+    return radiance_cache_size(radiance_cache_level(p, footprint)) <= t;
+}
+
+// The luminance of the cache's whole light at a hit (the front side's cell,
+// read without claiming it), what a re-trace compares; 0 where none.
+fn cache_luminance(point: vec3<f32>, side: vec3<f32>, surface: SceneSurface, footprint: f32, space: u32) -> f32 {
+    let c = radiance_cache_read(point, side, footprint, space, GI_CACHE_REACH);
+    if !c.found { return 0.0; }
+    let s = scene_surface_unpack(surface);
+    return luminance(s.albedo.rgb * (c.direct + c.indirect) / PI + s.emissive);
+}
+
+// What a ray of row `row` met: the hit's point, the normal of the side the
+// ray met and its distance (0: a miss, below 0: an inside).
+struct Met {
+    t: f32,
+    point: vec3<f32>,
+    normal: vec3<f32>,
+}
+
+fn met(row: u32) -> Met {
+    let ray = rays_in[row];
+    let hit = hits[row];
+    var m: Met;
+    if hit.t <= 0.0 {
+        m.normal = ray.dir;
+        return m;
+    }
+    m.point = ray.origin + ray.dir * hit.t;
+    if scene_hit_inside(hit) {
+        m.t = -hit.t;
+        m.normal = -ray.dir;
+        return m;
+    }
+    m.t = hit.t;
+    let face = scene_surface_face(surfaces[row]);
+    m.normal = select(face, -face, dot(face, ray.dir) > 0.0);
+    return m;
+}
+
+var<workgroup> w_rows: atomic<u32>;
+var<workgroup> w_base: u32;
+
+// A workgroup of 64 texels: each one's hit's light (module docs), its light
+// queries in one block of the batch.
+@compute @workgroup_size(64)
+fn gather_hits(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    if li == 0u { atomicStore(&w_rows, 0u); }
+    workgroupBarrier();
+    let traced = traced_size();
+    let n = traced.x * traced.y;
+    let i = id.x;
+    var light = GatherHitLight(0u, 0u, GATHER_NONE, 0.0);
+    var query: LightQuery;
+    var want = false;
+    if i < n && rays_in[i].t_max > 0.0 && gather_answer.x != 0u {
+        let ray = rays_in[i];
+        let m = met(i);
+        let eye = gi_trace.eye.xyz;
+        if m.t == 0.0 {
+            let sky = gi_sky_radiance((ray.origin - eye) * 0.001, ray.dir);
+            light.rest = scene_pack_radiance(sky);
+            light.cache_y = luminance(sky);
+        } else if m.t > 0.0 {
+            let surface = surfaces[i];
+            let footprint = scene_ray_footprint(ray, m.t);
+            let space = scene_ray_space(ray);
+            if trusted(m.point, footprint, m.t) {
+                let lit = gi_hit_light(m.point - eye, ray.dir, surface, footprint, space, false, true);
+                light.rest = scene_pack_radiance(lit.rgb);
+                light.cache_y = luminance(lit.rgb);
+            } else {
+                // The cell's indirect part (a bounce on, its error second
+                // order), unclaimed; the hit's direct light its own. Where
+                // the cache has no cell the probes' whole irradiance stands
+                // in, and no light of its own is added to it.
+                let lit = gi_hit_light(m.point - eye, ray.dir, surface, footprint, space, true, false);
+                light.rest = scene_pack_radiance(lit.rgb);
+                light.cache_y = cache_luminance(m.point, m.normal, surface, footprint, space);
+                if lit.w > 0.0 {
+                    let s = scene_surface_unpack(surface);
+                    let seed = gi_hash(i ^ gather.info.y * 0x9e3779b9u);
+                    let u = texel_sample(i, gather.info.y, 1u);
+                    query = light_query_point(m.point, footprint, s.normal, any(surface_transmission(s) > vec3<f32>(0.0)), u, seed, space);
+                    want = true;
+                }
+            }
+        }
+    }
+    var slot = 0u;
+    if want { slot = atomicAdd(&w_rows, 1u); }
+    workgroupBarrier();
+    if li == 0u {
+        let here = atomicLoad(&w_rows);
+        w_base = select(0u, atomicAdd(&light_header[3], here), here > 0u);
+    }
+    workgroupBarrier();
+    if want {
+        light.row = w_base + slot;
+        light_queries[light.row] = query;
+    }
+    if i < n { hit_light[i] = light; }
+}
+
+// The light batch's dispatch for the samplers, from its count.
+@compute @workgroup_size(1)
+fn gather_hits_header() {
+    let count = atomicLoad(&light_header[3]);
+    atomicStore(&light_header[0], (count + RAY_STREAM_GROUP - 1u) / RAY_STREAM_GROUP);
+    atomicStore(&light_header[1], 1u);
+    atomicStore(&light_header[2], 1u);
+}
+
+// A workgroup of 64 texels: each one's light sample's light at its hit,
+// waiting on a shadow ray from the side the light is on, the shadow rays in
+// one block of the stream.
+@compute @workgroup_size(64)
+fn gather_shadow(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    if li == 0u { atomicStore(&w_rows, 0u); }
+    workgroupBarrier();
+    let traced = traced_size();
+    let i = id.x;
+    var light = GatherHitLight(0u, 0u, GATHER_NONE, 0.0);
+    var shadow: SceneRay;
+    var want = false;
+    if i < traced.x * traced.y {
+        light = hit_light[i];
+        if light.row != GATHER_NONE {
+            let sample = light_samples[light.row];
+            light.row = GATHER_NONE;
+            let direct = gi_hit_direct(surfaces[i], sample);
+            if direct.lit {
+                let ray = rays_in[i];
+                let t = hits[i].t;
+                let p = ray.origin + ray.dir * t;
+                shadow = gi_shadow_ray(p + direct.side * gi_ray_offset(p), sample, scene_ray_footprint(ray, t), scene_ray_space(ray));
+                light.light = scene_pack_radiance(direct.light);
+                want = true;
+            }
+        }
+    }
+    var slot = 0u;
+    if want { slot = atomicAdd(&w_rows, 1u); }
+    workgroupBarrier();
+    if li == 0u {
+        let here = atomicLoad(&w_rows);
+        w_base = select(0u, atomicAdd(&shadow_header[3], here), here > 0u);
+    }
+    workgroupBarrier();
+    if want {
+        light.row = w_base + slot;
+        shadow_rays[light.row] = shadow;
+        shadow_hits[light.row] = SceneHit(0.0, 0u, 0u, 0u);
+    }
+    if i < traced.x * traced.y { hit_light[i] = light; }
+}
+
+// The shadow stream's dispatch for the tracers, from its count.
+@compute @workgroup_size(1)
+fn gather_shadow_header() {
+    let count = atomicLoad(&shadow_header[3]);
+    atomicStore(&shadow_header[0], (count + RAY_STREAM_GROUP - 1u) / RAY_STREAM_GROUP);
+    atomicStore(&shadow_header[1], 1u);
+    atomicStore(&shadow_header[2], 1u);
+    atomicAdd(&stats[GATHER_SHADOW_STAT], count);
+}
+
+// Texel `i`'s ray's light: the rest and its direct light through its shadow
+// ray (none on a frame the shadow rays were answered short of: the sample is
+// not taken).
+fn hit_radiance(i: u32) -> vec3<f32> {
+    let l = hit_light[i];
+    var c = scene_unpack_radiance(l.rest);
+    if l.row != GATHER_NONE {
+        c += scene_unpack_radiance(l.light) * scene_occlusion_through(shadow_answers[l.row]);
+    }
+    return c;
+}
+
 // Texel `i`'s re-traced sample (one texel in GATHER period, `gather_rays`):
-// its light now replaces the kept light; a sample whose light changed
-// beyond the cache's own noise leaves a confidence below 1 (and fewer
-// samples' worth in its reservoir), one whose ray now meets something else
-// leaves none.
+// a sample whose cache light changed beyond the cache's own noise leaves a
+// confidence below 1 (and fewer samples' worth in its reservoir, its light
+// scaled by the change), one whose ray now meets something else leaves none.
 @compute @workgroup_size(8, 8)
 fn gather_validate(@builtin(global_invocation_id) id: vec3<u32>) {
     let traced = traced_size();
@@ -498,61 +821,44 @@ fn gather_validate(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.y * traced.x + id.x;
     texels[i].y = 1.0;
     if !retraced(i) || gather_answer.x == 0u { return; }
-    var r = previous[i];
     let row = retrace_row(i);
-    if (gather.info.z & GATHER_HAS_PREVIOUS) == 0u || (r.flags & RESERVOIR_VALID) == 0u || rays_in[row].t_max <= 0.0 {
+    var r = res_unpack(previous[i], gather.previous_eye.xyz);
+    if (gather.info.z & GATHER_HAS_PREVIOUS) == 0u || !r.valid || rays_in[row].t_max <= 0.0 {
         return;
     }
     let ray = rays_in[row];
-    let a = answer(row);
+    let m = met(row);
     var same = false;
     var noise = 0.0;
-    if (r.flags & RESERVOIR_SKY) != 0u {
-        same = a.t == 0.0;
-    } else if a.t > 0.0 {
+    var now = 0.0;
+    if r.sky {
+        same = m.t == 0.0;
+        now = luminance(gi_sky_radiance((ray.origin - gi_trace.eye.xyz) * 0.001, ray.dir));
+    } else if m.t > 0.0 {
         // The same point: the ray left the same place along the same line,
         // so a tracer finds it at the same distance but for its own rounding
         // (2^-8 of the distance) and the start's offset.
-        let expected = distance(r.sample + gather.rebase.xyz, ray.origin);
-        same = abs(a.t - expected) <= 2.0 * gi_ray_offset(a.point) + expected / 256.0;
+        let expected = distance(r.sample, ray.origin);
+        same = abs(m.t - expected) <= 2.0 * gi_ray_offset(m.point) + expected / 256.0;
         noise = CACHE_NOISE;
+        now = cache_luminance(m.point, m.normal, surfaces[row], scene_ray_footprint(ray, m.t), scene_ray_space(ray));
     }
     var confidence = 0.0;
     if same {
-        let before = luminance(scene_unpack_radiance(r.radiance));
-        let now = luminance(a.light);
+        let before = r.cache_y;
         let most = max(before, now);
         let change = select(0.0, abs(now - before) / most, most > 1e-20);
         confidence = select(1.0 - (change - noise) / (1.0 - noise), 1.0, change <= noise);
-        r.radiance = scene_pack_radiance(a.light);
+        if before > 1e-20 && now > 0.0 {
+            r.radiance = scene_pack_radiance(scene_unpack_radiance(r.radiance) * (now / before));
+        }
+        r.cache_y = now;
         r.m *= confidence;
     } else {
-        r = invalid_reservoir();
+        r = no_res();
     }
-    previous[i] = r;
+    previous[i] = res_pack(r, gather.previous_eye.xyz);
     texels[i].y = saturate(confidence);
-}
-
-// Texel `i`'s ray as a reservoir (one sample, M 1, W 1 / pdf: with the
-// cosine density, pi over the geometry term in the sample's measure).
-fn fresh_reservoir(i: u32, x: vec3<f32>, n: vec3<f32>) -> GatherReservoir {
-    let a = answer(i);
-    var r: GatherReservoir;
-    r.receiver = x;
-    r.receiver_normal = scene_pack_unit(n);
-    r.radiance = scene_pack_radiance(a.light);
-    r.m = 1.0;
-    r.flags = RESERVOIR_VALID;
-    if a.t == 0.0 {
-        r.flags |= RESERVOIR_SKY;
-        r.sample = a.normal;
-    } else {
-        r.sample = a.point;
-        r.sample_normal = scene_pack_unit(a.normal);
-    }
-    let g = geometry(x, n, r);
-    r.weight = select(0.0, PI / g, g > 0.0);
-    return r;
 }
 
 // A random number in [0, 1) for texel `i`'s choice `k` this frame.
@@ -567,26 +873,38 @@ fn gather_temporal(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.y * traced.x + id.x;
     let p = traced_pixel(id.xy);
     let at = position_at(vec2<i32>(p));
-    texels[i].x = GATHER_NO_HIT;
-    texels[i].z = 1.0;
+    texels[i] = vec4<f32>(GATHER_NO_HIT, texels[i].y, 1.0, 0.0);
     if at.w == 0.0 || remapped(vec2<i32>(p)) {
-        reservoirs[i] = invalid_reservoir();
+        reservoirs[i] = res_pack(no_res(), gather.eye.xyz);
         return;
     }
     let x = at.xyz;
     let n = helio_gbuffer_normal(textureLoad(gbuf_normal, vec2<i32>(p), 0).xyz);
-    let answered = gather_answer.x != 0u;
-    var f = invalid_reservoir();
+    let answered = gather_answer.x != 0u && gather_answer.y != 0u && rays_in[i].t_max > 0.0;
+    // This frame's sample (one sample, M 1, W 1 / pdf: with the cosine
+    // density, pi over the geometry term in the sample's measure).
+    var f = no_res();
+    var flags = 0u;
     if answered {
-        f = fresh_reservoir(i, x, n);
-        let t = hits[i].t;
-        texels[i].x = select(GATHER_NO_HIT, t, t > 0.0);
+        let m = met(i);
+        let l = hit_radiance(i);
+        f.valid = true;
+        f.receiver = x;
+        f.normal = n;
+        f.radiance = scene_pack_radiance(l);
+        f.cache_y = hit_light[i].cache_y;
+        f.m = 1.0;
+        f.sky = m.t == 0.0;
+        f.sample = select(m.point, m.normal, f.sky);
+        f.sample_normal = m.normal;
+        let g = geometry(x, n, f);
+        f.weight = select(0.0, PI / g, g > 0.0);
+        texels[i].x = select(GATHER_NO_HIT, m.t, m.t > 0.0);
     }
-    let reuse = (gather.info.z & GATHER_REUSE) != 0u;
     // Where the traced pixel was: the reservoir of the previous block its
     // surface's footprint held most of.
-    var prev = invalid_reservoir();
-    if reuse && (gather.info.z & GATHER_HAS_PREVIOUS) != 0u {
+    var prev = no_res();
+    if (gather.info.z & GATHER_REUSE) != 0u && (gather.info.z & GATHER_HAS_PREVIOUS) != 0u {
         let hp = history_pixel(textureLoad(history_pixels, vec2<i32>(p), 0), p);
         let taps = history_taps(hp);
         var best = 0u;
@@ -598,10 +916,9 @@ fn gather_temporal(@builtin(global_invocation_id) id: vec3<u32>) {
             let b = vec2<u32>(q) / side();
             if all(b < traced) {
                 let j = b.y * traced.x + b.x;
-                let r = rebased(previous[j]);
+                let r = res_unpack(previous[j], gather.previous_eye.xyz);
                 let footprint = footprint_at(x);
-                if (r.flags & RESERVOIR_VALID) != 0u && r.m > 0.0
-                    && same_surface(x, n, r.receiver, scene_unpack_unit(r.receiver_normal), footprint, block_reach(footprint)) {
+                if r.valid && r.m > 0.0 && same_surface(x, n, r.receiver, r.normal, footprint, block_reach(footprint)) {
                     prev = r;
                     prev.m = min(prev.m, gather.reuse.x);
                     texels[i].z = texels[j].y;
@@ -609,22 +926,25 @@ fn gather_temporal(@builtin(global_invocation_id) id: vec3<u32>) {
             }
         }
     }
-    if !answered && (prev.flags & RESERVOIR_VALID) == 0u {
-        reservoirs[i] = invalid_reservoir();
+    if !f.valid && !prev.valid {
+        reservoirs[i] = res_pack(no_res(), gather.eye.xyz);
+        texels[i].w = f32(flags);
         return;
     }
     // Generalised RIS over the two domains (this frame's sample at this
     // receiver, M 1; the previous reservoir at its own receiver, M its own),
     // each sample weighted by the balance heuristic over both receivers'
-    // target functions (no visibility between them: the receivers are one
-    // surface within a block).
+    // target functions (luminance times the geometry term); whether the
+    // previous sample is visible from this receiver is decided after the
+    // spatial stage, for the sample chosen there (`gather_signal`).
     let xp = prev.receiver;
-    let np = scene_unpack_unit(prev.receiver_normal);
-    let mf = select(0.0, 1.0, answered);
+    let np = prev.normal;
+    let mf = select(0.0, 1.0, f.valid);
     var sum = 0.0;
     var chosen = f;
     var aim = 0.0;
-    if answered {
+    var own = f.valid;
+    if f.valid {
         let y = luminance(scene_unpack_radiance(f.radiance));
         let pc = y * geometry(x, n, f);
         let pp = select(0.0, y * geometry(xp, np, f), prev.m > 0.0);
@@ -632,7 +952,7 @@ fn gather_temporal(@builtin(global_invocation_id) id: vec3<u32>) {
         sum += w;
         aim = pc;
     }
-    if (prev.flags & RESERVOIR_VALID) != 0u {
+    if prev.valid {
         let y = luminance(scene_unpack_radiance(prev.radiance));
         let pc = y * geometry(x, n, prev);
         let pp = y * geometry(xp, np, prev);
@@ -642,14 +962,17 @@ fn gather_temporal(@builtin(global_invocation_id) id: vec3<u32>) {
         if choice(i, 0u) * sum < w {
             chosen = prev;
             aim = pc;
+            own = false;
         }
     }
     chosen.receiver = x;
-    chosen.receiver_normal = scene_pack_unit(n);
+    chosen.normal = n;
     chosen.weight = select(0.0, sum / aim, aim > 0.0);
     chosen.m = min(mf + prev.m, gather.reuse.x);
-    chosen.flags |= RESERVOIR_VALID;
-    reservoirs[i] = chosen;
+    chosen.valid = true;
+    if own { flags |= TEXEL_OWN_KEPT; }
+    texels[i].w = f32(flags);
+    reservoirs[i] = res_pack(chosen, gather.eye.xyz);
 }
 
 // The texel `b + offset`'s spatial neighbour `k` this frame: points of a
@@ -667,59 +990,34 @@ fn gather_spatial(@builtin(global_invocation_id) id: vec3<u32>) {
     if any(id.xy >= traced) { return; }
     let i = id.y * traced.x + id.x;
     let b = vec2<i32>(id.xy);
-    let own = reservoirs[i];
-    let t = texels[i];
-    if (own.flags & RESERVOIR_VALID) == 0u {
-        // No sample here this frame (a frame a tracer answered short, with
-        // no reservoir to hold; the first frames): the probes' irradiance at
-        // the traced pixel stands in, as it does for a hit the cache has no
-        // cell for, rather than a sample of no light the denoiser would
-        // take as dark. Its history kept (confidence 1). The sky and
-        // remapped content: no sample (the denoiser skips the sky; the
-        // resolve takes the probes for remapped pixels).
-        var input = DenoiseIrradianceInput(vec4<f32>(0.0, 0.0, 0.0, GATHER_NO_HIT), vec4<f32>(0.0, 0.0, 0.0, 1.0));
-        let p = vec2<i32>(traced_pixel(id.xy));
-        let at = position_at(p);
-        if at.w > 0.0 && !remapped(p) {
-            let n = helio_gbuffer_normal(textureLoad(gbuf_normal, p, 0).xyz);
-            let e = PI * gi_irradiance(at.xyz - gi_trace.eye.xyz, n).rgb;
-            input.signal0.w = f32(side()) * footprint_at(at.xyz);
-            input = denoise_irradiance_add(input, e, n);
-        }
-        textureStore(signal0, b, input.signal0);
-        textureStore(signal1, b, input.signal1);
-        return;
-    }
+    let own = res_unpack(reservoirs[i], gather.eye.xyz);
+    visibility_rays[i] = no_ray();
+    if !own.valid { return; }
     let x = own.receiver;
-    let n = scene_unpack_unit(own.receiver_normal);
+    let n = own.normal;
     let footprint = footprint_at(x);
     // The domains: this texel's temporal reservoir, then its neighbours'
-    // that are the same surface within the radius; their receivers' normals
-    // and their samples' unpacked once.
-    var domains: array<GatherReservoir, 5>;
-    var normals: array<vec3<f32>, 5>;
+    // that are the same surface within the radius, with nothing the depth
+    // buffer shows between their receiver and this one.
+    var domains: array<Res, 5>;
     var count = 1u;
     domains[0] = own;
-    normals[0] = n;
     if (gather.info.z & GATHER_REUSE) != 0u {
         let reach = (gather.reuse.w * f32(side()) * 1.41421356 + 1.0) * footprint;
         for (var k = 0u; k < GATHER_NEIGHBOURS; k++) {
             let q = neighbour(i, id.xy, k);
             if any(q < vec2<i32>(0)) || any(q >= vec2<i32>(traced)) || all(q == b) { continue; }
-            let r = reservoirs[u32(q.y) * traced.x + u32(q.x)];
-            if (r.flags & RESERVOIR_VALID) == 0u || r.m <= 0.0 { continue; }
-            let nq = scene_unpack_unit(r.receiver_normal);
-            if !same_surface(x, n, r.receiver, nq, footprint, reach) { continue; }
+            let r = res_unpack(reservoirs[u32(q.y) * traced.x + u32(q.x)], gather.eye.xyz);
+            if !r.valid || r.m <= 0.0 { continue; }
+            if !same_surface(x, n, r.receiver, r.normal, footprint, reach) { continue; }
+            if !seen_between(vec2<i32>(traced_pixel(id.xy)), vec2<i32>(traced_pixel(vec2<u32>(q))), x, r.receiver) { continue; }
             domains[count] = r;
-            normals[count] = nq;
             count += 1u;
         }
     }
     // Generalised RIS over the domains, each sample weighted by the balance
     // heuristic over every domain's target function at its own receiver
-    // (luminance cancels in it: the geometry terms alone); no visibility
-    // ray between a neighbour's sample and this receiver (rendering.md:
-    // its bias measured against the reference).
+    // (luminance cancels in it: the geometry terms alone).
     var sum = 0.0;
     var chosen = 0u;
     var aim = 0.0;
@@ -729,7 +1027,7 @@ fn gather_spatial(@builtin(global_invocation_id) id: vec3<u32>) {
         var own_g = 0.0;
         var all_g = 0.0;
         for (var j = 0u; j < count; j++) {
-            let g = point_geometry(domains[j].receiver, normals[j], y);
+            let g = point_geometry(domains[j].receiver, domains[j].normal, y);
             all_g += domains[j].m * g;
             if j == k { own_g = g; }
         }
@@ -743,17 +1041,77 @@ fn gather_spatial(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let r = domains[chosen];
     let weight = select(0.0, sum / aim, aim > 0.0);
-    // The irradiance estimate: the sample's light times its geometry term
-    // and weight, divided by the near field at the traced pixel.
-    let e = scene_unpack_radiance(r.radiance) * geometry(x, n, r) * weight;
-    let p = traced_pixel(id.xy);
-    let v = max(textureLoad(near_field, vec2<i32>(p), 0).x, 1e-4);
-    // The hit distance the denoiser holds a record over: this frame's ray's,
-    // no nearer than a block's footprint (what is nearer is the near
-    // field's).
-    let hit = max(t.x, f32(side()) * footprint);
-    var input = DenoiseIrradianceInput(vec4<f32>(0.0, 0.0, 0.0, hit), vec4<f32>(0.0, 0.0, 0.0, saturate(t.z)));
-    input = denoise_irradiance_add(input, e / v, toward(x, r));
+    let dir = toward(x, r);
+    picks[i] = vec4<f32>(scene_unpack_radiance(r.radiance) * geometry(x, n, r) * weight, bitcast<f32>(scene_pack_unit(dir)));
+    // A sample received elsewhere (the previous frame's, a neighbour's) is
+    // assumed visible by the resampling: a visibility ray from this receiver
+    // to it decides (`gather_signal`). This frame's own sample was traced
+    // from here.
+    let flags = u32(texels[i].w);
+    if chosen != 0u || (flags & TEXEL_OWN_KEPT) == 0u {
+        let o = x + n * gi_ray_offset(x);
+        var reach = GI_RAY_REACH;
+        if !r.sky {
+            reach = max(distance(r.sample, o) - 2.0 * gi_ray_offset(r.sample), 0.0);
+        }
+        let cone = scene_cone_in_space(scene_ray_cone(footprint, 0.0, RAY_MASK_ALL), gather.info.w);
+        visibility_rays[i] = SceneRay(o, max(reach, 1e-4), dir, cone);
+    }
+}
+
+@compute @workgroup_size(8, 8)
+fn gather_signal(@builtin(global_invocation_id) id: vec3<u32>) {
+    let traced = traced_size();
+    if any(id.xy >= traced) { return; }
+    let i = id.y * traced.x + id.x;
+    let b = vec2<i32>(id.xy);
+    let t = texels[i];
+    let p = vec2<i32>(traced_pixel(id.xy));
+    var input = DenoiseIrradianceInput(vec4<f32>(0.0, 0.0, 0.0, GATHER_NO_HIT), vec4<f32>(0.0, 0.0, 0.0, 1.0));
+    let at = position_at(p);
+    if at.w == 0.0 || remapped(p) {
+        // The sky and remapped content: no sample (the denoiser skips the
+        // sky; the resolve takes the probes for remapped pixels).
+        textureStore(signal0, b, input.signal0);
+        textureStore(signal1, b, input.signal1);
+        return;
+    }
+    let footprint = footprint_at(at.xyz);
+    // The estimate: the chosen sample's times what its visibility ray lets
+    // through (none where the receiver does not see it: the resampling gave
+    // it its share assuming it did, so its share of the light is none, as
+    // ReSTIR GI discards an occluded reuse; this frame's own sample in its
+    // place measured no better behind an occluder). Where the texel has no sample, or the
+    // visibility rays were answered short, the probes' irradiance at the
+    // traced pixel (a sample of no light would be taken as dark), its
+    // history kept.
+    var e = vec3<f32>(0.0);
+    var dir = vec3<f32>(0.0);
+    var have = false;
+    let tested = visibility_rays[i].t_max > 0.0;
+    if res_unpack(reservoirs[i], gather.eye.xyz).valid && (!tested || gather_answer.z != 0u) {
+        let chosen = picks[i];
+        var through = vec3<f32>(1.0);
+        if tested {
+            through = scene_occlusion_through(visibility_answers[i]);
+        }
+        e = chosen.xyz * through;
+        dir = scene_unpack_unit(bitcast<u32>(chosen.w));
+        have = true;
+    }
+    let n = helio_gbuffer_normal(textureLoad(gbuf_normal, p, 0).xyz);
+    if !have {
+        e = PI * gi_irradiance(at.xyz - gi_trace.eye.xyz, n).rgb;
+        dir = n;
+        input.signal0.w = f32(side()) * footprint;
+    } else {
+        // The hit distance the denoiser holds a record over: this frame's
+        // ray's, no nearer than a block's footprint (what is nearer is the
+        // near field's); the confidence the reused reservoir's re-trace left.
+        input.signal0.w = max(t.x, f32(side()) * footprint);
+        input.signal1.w = saturate(t.z);
+    }
+    input = denoise_irradiance_add(input, e, dir);
     textureStore(signal0, b, input.signal0);
     textureStore(signal1, b, input.signal1);
 }
