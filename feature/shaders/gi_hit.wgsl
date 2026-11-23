@@ -20,44 +20,35 @@ fn gi_sky_radiance(from_camera: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
 }
 
 // A side of a hit as the cache holds it (`gi_hit_cell`): its irradiance / pi
-// from the lights (`direct`) and from everything else (`indirect`); `w` 1
-// where the cache has light for the hit, 0.5 where a cell's stand-in stood
-// in, 0 where the probes' irradiance did (in `indirect`: the probes take in
-// what their rays meet, never the lights' own light).
+// from the lights (`direct`) and from everything else (`indirect`); `found`
+// where the cache has light for the hit; elsewhere `indirect` is the probes'
+// irradiance at the hit (the probes take in what their rays meet, never the
+// lights' own light: DDGI's recursion), and `waiting` says the surface's
+// cell there has no value yet (it is new: a scene starting, the eye
+// somewhere new), as against a cell whose light does not hold at the hit
+// (an occluder or the reader's reach between).
 struct GiHitCell {
     direct: vec3<f32>,
     indirect: vec3<f32>,
-    w: f32,
+    found: bool,
+    waiting: bool,
 }
 
-// The cache at eye-relative hit `at` on the side of unit `side` in space
-// `space` for a reader of reach `reach` (`radiance_cache_read`: the ray's
-// length for a ray that left a surface, RADIANCE_CACHE_FAR for a probe's),
-// marking its cell when `mark`.
-// Where it has no light for the hit, a stand-in: the
-// hit's own cell's light where its rays have not yet explored the way to
-// the hit (a few updates: the hits that lack light are the ones near what
-// splits a cell, darker than most, which leaving out would brighten what
-// they light); where they found something in the way (the hit is past an
-// occluder or the reach, its finer cell new this frame or the last), the
-// probes' at the hit toward `n` (their own previous state), never that
-// cell's light from the occluder's other side.
+// The cache at eye-relative hit `at` on the side of unit `side` (normal `n`)
+// in space `space` for a reader of reach `reach` (`radiance_cache_read`: the
+// ray's length for a ray that left a surface, RADIANCE_CACHE_FAR for a
+// probe's), marking its cell when `mark`.
 fn gi_hit_cell(at: vec3<f32>, side: vec3<f32>, n: vec3<f32>, space: u32, reach: f32, mark: bool) -> GiHitCell {
     let p = at + gi_trace.eye.xyz;
     let c = radiance_cache_read(p, side, space, reach);
     if mark { radiance_cache_mark(p, side, space, reach); }
-    if c.found { return GiHitCell(c.direct / PI, c.indirect / PI, 1.0); }
+    if c.found { return GiHitCell(c.direct / PI, c.indirect / PI, true, false); }
+    var waiting = false;
     if radiance_cache_present() {
         let s = radiance_cache_find(radiance_cache_key(p, side, radiance_cache_level(p), space));
-        if s != RADIANCE_CACHE_NONE && radiance_cache_has_value(radiance_cache_entries[s])
-            && radiance_cache_light_at(radiance_cache_entries[s], p, reach) == RADIANCE_CACHE_UNKNOWN {
-            let e = radiance_cache_entries[s];
-            let indirect = vec3<f32>(e.indirect[0] + e.bounced[0], e.indirect[1] + e.bounced[1], e.indirect[2] + e.bounced[2]);
-            let direct = vec3<f32>(e.direct[0], e.direct[1], e.direct[2]);
-            return GiHitCell(direct / PI, indirect / PI, 0.5);
-        }
+        waiting = s == RADIANCE_CACHE_NONE || !radiance_cache_has_value(radiance_cache_entries[s]);
     }
-    return GiHitCell(vec3<f32>(0.0), gi_irradiance(at, n).rgb, 0.0);
+    return GiHitCell(vec3<f32>(0.0), gi_irradiance(at, n).rgb, false, waiting);
 }
 
 // The sides of a hit (`GiHitLight::own`, `gi_hit_direct`): the one its ray
@@ -68,15 +59,15 @@ const GI_SIDE_FAR: u32 = 2u;
 // What a hit sends back along its ray of the cache's light (`gi_hit_light`):
 // `reflected`, what it reflects of the irradiance on the side its ray met and
 // lets through of its far side's; `emitted`, what it emits; `answered`, the
-// cache lit every side that reflects or lets light through; `stood`, where
-// not, each such side took a cell's stand-in (none took the probes'); `own`,
-// the sides whose direct light the reader takes from a light sample of its
-// own (`gi_hit_direct`; GI_SIDE_*).
+// cache lit every side that reflects or lets light through; `waiting`, a
+// side that does took the probes' while its cell is new (`GiHitCell`);
+// `own`, the sides whose direct light the reader takes from a light sample
+// of its own (`gi_hit_direct`; GI_SIDE_*).
 struct GiHitLight {
     reflected: vec3<f32>,
     emitted: vec3<f32>,
     answered: bool,
-    stood: bool,
+    waiting: bool,
     own: u32,
 }
 
@@ -84,10 +75,11 @@ struct GiHitLight {
 // direction `dir`: a Lambertian surface `surface` (a stream's row) lit by
 // the cache on the side the ray met, plus its transmission share of the far
 // side's cell (two-sided leaves), and what it emits; `reach` the reader's
-// (`gi_hit_cell`). A side's direct light: none for `indirect_only` (the
-// reader lights the hit itself); the cache's where it has light for the hit;
-// elsewhere, for a reader that lights such a side itself (`own_light`), none
-// (the side is in `own`), and the stand-in's for one that does not. The near
+// (`gi_hit_cell`). Where the cache has no light for a side, the hit is lit
+// on the spot: the probes' irradiance there for its indirect light and, for
+// a reader that lights such a side itself (`own_light`), its own light
+// sample for the direct (the side is in `own`). A side's direct light is
+// none for `indirect_only` (the reader lights every side itself). The near
 // side's cell is marked where `mark`; the far side's is read, never marked:
 // the hit is on the side its ray met, and behind it may be the inside of
 // what lets light through (a voxel of leaves: a cell seated there would
@@ -100,19 +92,23 @@ fn gi_hit_light(at: vec3<f32>, dir: vec3<f32>, surface: SceneSurface, space: u32
     let through = surface_transmission(s);
     let front = gi_hit_cell(at, side, s.normal, space, reach, mark);
     let dark = all(s.albedo.rgb == vec3<f32>(0.0));
-    var lit = GiHitLight(vec3<f32>(0.0), s.emissive, front.w == 1.0 || dark, front.w > 0.0 || dark, 0u);
-    let front_own = own_light && front.w < 1.0 && !dark;
-    let front_direct = !indirect_only && !front_own;
-    lit.reflected = s.albedo.rgb * (front.indirect + select(vec3<f32>(0.0), front.direct, front_direct));
-    if front_own { lit.own |= GI_SIDE_NEAR; }
+    var lit = GiHitLight(vec3<f32>(0.0), s.emissive, front.found || dark, front.waiting && !dark, 0u);
+    if !dark {
+        lit.reflected = s.albedo.rgb * (front.indirect + select(vec3<f32>(0.0), front.direct, !indirect_only));
+        if own_light && !front.found { lit.own |= GI_SIDE_NEAR; }
+    }
     if any(through > vec3<f32>(0.0)) {
+        // A far side the cache has no light for passes on nothing of the
+        // probes' (at a point on a thin surface they hold the near side's
+        // light too, both sides' probes seeing the point: the surface's own
+        // light would come back through it).
         let back = gi_hit_cell(at, -side, -s.normal, space, reach, false);
-        let back_own = own_light && back.w < 1.0;
-        let back_direct = !indirect_only && !back_own;
-        lit.reflected += through * (back.indirect + select(vec3<f32>(0.0), back.direct, back_direct));
-        lit.answered = lit.answered && back.w == 1.0;
-        lit.stood = lit.stood && back.w > 0.0;
-        if back_own { lit.own |= GI_SIDE_FAR; }
+        if back.found {
+            lit.reflected += through * (back.indirect + select(vec3<f32>(0.0), back.direct, !indirect_only));
+        }
+        lit.answered = lit.answered && back.found;
+        lit.waiting = lit.waiting || back.waiting;
+        if own_light && !back.found { lit.own |= GI_SIDE_FAR; }
     }
     return lit;
 }

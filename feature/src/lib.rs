@@ -81,19 +81,25 @@ pub fn gi_stream(config: &GiConfig) -> Stream {
         .with_detail(SurfaceDetail::Diffuse)
 }
 
-/// The shadow rays of the cache rays: toward each cache ray's hit's light
-/// sample and its cell's, as many rows as there are such rays this frame,
-/// packed from 0 (the shadow pass writes the count on the GPU), at most two
-/// a cache ray.
+/// The shadow rays of GI's stream's hits: toward each cache ray's hit's
+/// light sample and its cell's, and each probe ray's hit's lit on the spot,
+/// as many rows as there are such rays this frame, packed from 0 (the shadow
+/// pass writes the count on the GPU), at most two a cache ray and one a
+/// probe ray.
 pub fn shadow_stream(cache: &CacheConfig) -> Stream {
-    Stream::new("radiance_cache_shadow", RayClass::Occlusion, 2 * cache.rays)
+    Stream::new(
+        "radiance_cache_shadow",
+        RayClass::Occlusion,
+        MAX_RAYS + 2 * cache.rays,
+    )
 }
 
-/// The cache rays asking the frame's light samplers for one light each at
-/// their hit and at their cell: as many queries as that this frame, packed
-/// from 0 (the light pass writes the count on the GPU).
+/// GI's stream's hits asking the frame's light samplers for one light each:
+/// a cache ray's at its hit and at its cell, a probe ray's hit the cache has
+/// no light for (lit on the spot); as many queries as that this frame,
+/// packed from 0 (the light pass writes the count on the GPU).
 pub fn light_batch(cache: &CacheConfig) -> LightBatch {
-    LightBatch::new("radiance_cache", 2 * cache.rays)
+    LightBatch::new("radiance_cache", MAX_RAYS + 2 * cache.rays)
 }
 
 /// GI's own graph keys between its passes: this frame's update and reset
@@ -1230,9 +1236,12 @@ mod tests {
         assert_eq!(shadows.run, 1);
         assert_eq!(shadows.class, RayClass::Occlusion);
         // Two shadow rays and two light queries a cache ray at most (its
-        // hit's and its cell's); none for a probe's.
-        assert_eq!(shadows.capacity, 2 * config.cache.rays);
-        assert_eq!(light_batch(&config.cache).capacity, 2 * config.cache.rays);
+        // hit's and its cell's), one a probe ray (its hit lit on the spot).
+        assert_eq!(shadows.capacity, MAX_RAYS + 2 * config.cache.rays);
+        assert_eq!(
+            light_batch(&config.cache).capacity,
+            MAX_RAYS + 2 * config.cache.rays
+        );
         assert_ne!(rays.rays, shadows.rays);
     }
 }

@@ -12,14 +12,15 @@ const GI_RAY_SPREAD: f32 = 0.443;
 // The most distance a probe ray or a shadow ray toward the sun travels:
 // past the far side of an Earth-sized planet.
 const GI_RAY_REACH: f32 = 1e9;
-// A pending ray light that waits on no shadow ray.
+// A pending ray light that waits on no shadow ray (a cache ray's), or a
+// probe's hit the cache lit whole.
 const GI_NO_ROW: u32 = 0xffffffffu;
-// A probe ray's `GiPending::light`: its hit's light was not in the radiance
-// cache yet (the probes' own stood in).
-const GI_UNLIT: u32 = 1u;
-// ... where the cache had a cell's light for it though not one shown to hold
-// at the hit (`gi_light`'s stand-in): counted as unlit, its light kept.
-const GI_STOOD_IN: u32 = 2u;
+// A probe's hit lit on the spot (`GiPending::row` other than GI_NO_ROW): the
+// row of what its light waits on in the low bits (GI_ROW_INDEX all ones:
+// nothing, its light sample gave it nothing), and GI_ROW_WAITING where the
+// cell it had no light from was new (`gi_integrate`'s readiness).
+const GI_ROW_INDEX: u32 = 0x3fffffffu;
+const GI_ROW_WAITING: u32 = 0x40000000u;
 
 // The radiance cache's rays in GI's stream (`gi_cache.wgsl`, `cache.rs`):
 // CACHE_RAYS a lit cell, its cells' rays together, after the probes' rays
@@ -41,16 +42,17 @@ struct GiTrace {
 }
 
 // What lighting a ray's hit leaves for its integration (`gi_pending`, a row
-// a ray of GI's stream): for a cache ray, the light of the hit's light
-// sample (`scene_pack_radiance`: the light the frame's samplers chose for
-// it, off the surface), waiting on `row` (`gi_light`: the hit's row of the
-// light batch; once `gi_shadow` ran, its shadow ray's row of the shadow
-// stream; GI_NO_ROW: none, and always for a probe's ray, whose `light` is
-// GI_UNLIT where the cache could not light its hit); the rest of its
-// light (from the radiance cache at the hit, through it from its far side,
-// what it emits; the sky on a miss); and the ray's distance from its
-// origin (a probe's: from the probe): above 0 a hit, 0 a miss, below 0 a hit
-// on an inside at minus that.
+// a ray of GI's stream): the light of the hit's own light sample where it
+// takes one (`scene_pack_radiance`: the light the frame's samplers chose for
+// it, off the surface; every cache ray's hit, a probe's hit lit on the
+// spot), waiting on `row` (`gi_light`: the hit's row of the light batch,
+// `light` the sides that take it, GI_SIDE_*; once `gi_shadow` ran, its
+// shadow ray's row of the shadow stream; GI_NO_ROW: none; a probe's as
+// GI_ROW_INDEX and GI_ROW_WAITING say); the rest of its light (from the
+// radiance cache at the hit or the probes' where it has none, through it
+// from its far side, what it emits; the sky on a miss); and the ray's
+// distance from its origin (a probe's: from the probe): above 0 a hit, 0 a
+// miss, below 0 a hit on an inside at minus that.
 struct GiPending {
     light: u32,
     rest: u32,

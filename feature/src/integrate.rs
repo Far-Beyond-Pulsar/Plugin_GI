@@ -1,17 +1,19 @@
 //! This frame's probe rays into their probes (`gi_integrate.wgsl`, README.md
-//! "The frame"), once their hits were lit from the radiance cache: the
+//! "The frame"), once their hits were lit (from the radiance cache, or on
+//! the spot where it has no light for them, through the shadow stream): the
 //! probes update in the frame their rays were traced in. On a frame where a
-//! tracer answered GI's stream short (`stream::Answers`: a kind's kernels
-//! still compiling, what it traces not drawn yet) the probes hold: rays that
-//! miss geometry a tracer knows of would teach them a world without it, and
-//! their history keeps what it is taught for many updates.
+//! tracer answered GI's stream or the shadow stream short (`stream::Answers`:
+//! a kind's kernels still compiling, what it traces not drawn yet) the
+//! probes hold: rays that miss geometry a tracer knows of would teach them a
+//! world without it, and their history keeps what it is taught for many
+//! updates.
 //!
-//! A probe whose hits the cache could not light yet holds too, and goes on
-//! the held list, read back without waiting ([`Held`]): GI's schedule takes
-//! those probes first again once the list comes back, a few frames later,
-//! when the cache has lit the cells their hits made (the cache lights new
-//! cells first). A probe's first update so waits on the cache's light, not
-//! on its turn in the schedule.
+//! A probe never updated whose hits met cells still new holds too, and goes
+//! on the held list, read back without waiting ([`Held`]): GI's schedule
+//! takes those probes first again once the list comes back, a few frames
+//! later, when the cache has lit the cells their hits made (the cache lights
+//! new cells first). A probe's first update so waits on the cache's light,
+//! not on its turn in the schedule; every update after takes every ray.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -52,8 +54,10 @@ impl Held {
 
 /// The probes' integration (module docs).
 pub struct GiIntegratePass {
-    /// GI's stream's answers.
-    answers: Arc<stream::Answers>,
+    /// GI's stream's answers and the shadow stream's.
+    answers: [Arc<stream::Answers>; 2],
+    /// The shadow stream's hits (what a probe's own light sample waits on).
+    shadow_hits: &'static str,
     /// The held list on the GPU, its way back and where it goes.
     held: wgpu::Buffer,
     readbacks: helio_core::gpu_cache::ReadbackPool,
@@ -67,8 +71,14 @@ pub struct GiIntegratePass {
 
 impl GiIntegratePass {
     /// The pass, holding the probes on frames where `answers` (GI's
-    /// stream's) were short, its held probes back to `retries`.
-    pub fn new(device: &wgpu::Device, answers: Arc<stream::Answers>, retries: Held) -> Self {
+    /// stream's and the shadow stream's, `shadows`) were short, its held
+    /// probes back to `retries`.
+    pub fn new(
+        device: &wgpu::Device,
+        answers: [Arc<stream::Answers>; 2],
+        shadows: &stream::Stream,
+        retries: Held,
+    ) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("GI integrate"),
             entries: &[
@@ -76,6 +86,7 @@ impl GiIntegratePass {
                 storage(1, false),
                 storage(2, true),
                 storage(3, true),
+                storage(4, true),
                 storage(5, true),
                 storage(6, false),
             ],
@@ -89,6 +100,7 @@ impl GiIntegratePass {
         let pipeline_layout = pipeline_layout(device, "GI integrate", &layout);
         Self {
             answers,
+            shadow_hits: shadows.hits,
             held: crate::buffer(
                 device,
                 "GI held probes",
@@ -109,7 +121,14 @@ impl GiIntegratePass {
             ),
             layout,
             cache: helio_core::gpu_cache::GpuCache::new(),
-            reads: &[GI_FRAME, GI_PROBES, GI_LISTS, GI_PENDING, GI_ANSWERED],
+            reads: helio_frame_api::static_names(&[
+                GI_FRAME,
+                GI_PROBES,
+                GI_LISTS,
+                GI_PENDING,
+                GI_ANSWERED,
+                shadows.hits,
+            ]),
         }
     }
 }
@@ -153,15 +172,16 @@ impl RenderPass for GiIntegratePass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        if !self.answers.complete() {
+        if !self.answers.iter().all(|a| a.complete()) {
             return Ok(());
         }
         let binding = |name: &str| ctx.registry.buffer_binding(name);
-        let (Some(frame), Some(probes), Some(lists), Some(pending), Some(answered)) = (
+        let (Some(frame), Some(probes), Some(lists), Some(pending), Some(shadows), Some(answered)) = (
             binding(GI_FRAME),
             binding(GI_PROBES),
             binding(GI_LISTS),
             binding(GI_PENDING),
+            binding(self.shadow_hits),
             binding(GI_ANSWERED),
         ) else {
             return Ok(());
@@ -177,6 +197,7 @@ impl RenderPass for GiIntegratePass {
                     entry(1, probes),
                     entry(2, lists),
                     entry(3, pending),
+                    entry(4, shadows),
                     entry(5, answered),
                     entry(6, &self.held),
                 ],

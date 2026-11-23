@@ -13,21 +13,21 @@
 // answered GI's stream: the probes' rays (a workgroup a probe, a lane a
 // ray), then the radiance cache's (a lane a ray).
 //
-// `gi_light`: a hit's light from the radiance cache (`frame_radiance_cache`:
-// the irradiance arriving at the hit's cell), through it from its far side
-// and what it emits, or the sky on a miss, into `gi_pending`; every hit marks
-// its cell in use (the side its ray met; the far side is read, not
-// marked). A probe's hit takes the cache's whole irradiance: lighting a
-// surface for indirect purposes is the cache's alone. A cache ray's hit
-// takes its indirect part, and a query of the frame's light samples
-// (`LightQuery`) for its direct light, with one more query a cache ray for
-// its cell's own direct light, compacted into the light batch.
+// `gi_light`: a hit's light as GI lights a hit (`gi_hit`: the radiance
+// cache's irradiance at its cell, through it from its far side, what it
+// emits), or the sky on a miss, into `gi_pending`; every hit marks its cell
+// in use (the side its ray met; the far side is read, not marked). A probe's
+// hit takes the cache's whole irradiance where the cache has light for it,
+// and is lit on the spot where it has none (the probes' irradiance there
+// and a light sample of its own). A cache ray's hit takes the cache's
+// indirect part and a light sample for its direct light, with one more
+// query a cache ray for its cell's own direct light. The queries of the
+// frame's light samples (`LightQuery`) are compacted into the light batch.
 //
-// `gi_shadow`: each cache ray's light samples, its hit's off the hit's
-// surface (Lambertian on the side the light is on; through it by its
-// transmission share from behind) and its cell's as irradiance there, into
-// `gi_pending` and `cell_pending`, waiting on shadow rays toward the light,
-// compacted into the shadow stream.
+// `gi_shadow`: each light sample's light, the hit's off its surface on the
+// sides that take it (`gi_hit_direct`) and a cell's as irradiance there,
+// into `gi_pending` and `cell_pending`, waiting on shadow rays toward the
+// light, compacted into the shadow stream.
 
 @group(0) @binding(0) var<uniform> frame_gi: GiFrame;
 @group(0) @binding(1) var<storage, read> gi_probes: array<u32>;
@@ -133,6 +133,9 @@ fn gi_light(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     var hit_query: LightQuery;
     var cell_query: LightQuery;
     var want_hit = false;
+    // A probe's hit lit on the spot while its cell is new (`gi_integrate`'s
+    // readiness).
+    var waiting = false;
     let seed = gi_hash(row ^ gi_trace.info.x);
     if live {
         let hit = ray_hits[row];
@@ -152,9 +155,7 @@ fn gi_light(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
                 // The hit's surface: the frame's `SurfaceData`, as a G-buffer
                 // texel holds it. GI's stream asks for
                 // `SurfaceDetail::Diffuse`: lit as Lambertian (`gi_hit`), on
-                // the side the ray met. A probe's hit the cache could not
-                // light yet, where it matters (a surface that reflects or lets
-                // light through): `gi_integrate` holds a probe with many.
+                // the side the ray met.
                 let n = s.normal;
                 let footprint = width + spread * hit.t;
                 let through = surface_transmission(s);
@@ -166,25 +167,30 @@ fn gi_light(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
                 // grids), where keeping finer cells at every contact the
                 // cache's rays meet would multiply its working set.
                 let reach = RADIANCE_CACHE_FAR;
-                let lit = gi_hit_light(at, dir, surface, space, reach, !probe, false, true);
+                let lit = gi_hit_light(at, dir, surface, space, reach, !probe, probe, true);
                 bounced = lit.reflected;
                 rest = lit.emitted;
                 // A probe takes the hit's whole light; a cache ray's cell
                 // folds what the hit reflects of the cache apart.
                 if probe { rest += bounced; }
-                if probe && !lit.answered { pending.light = select(GI_UNLIT, GI_STOOD_IN, lit.stood); }
                 // A cache ray's hit the cache has no light for: no bounced
-                // light from it (a stand-in, a cell's from the other side of
-                // what its rays have not yet explored or the probes', would
-                // carry light into the cache across what its cells keep
-                // apart, and the cache's light feeds itself).
+                // light from it (the probes' irradiance there would carry
+                // light into the cache across what its cells keep apart, and
+                // the cache's light feeds itself).
                 if !probe && !lit.answered { cell.unlit = 1u; }
-                if !probe {
-                    // Its direct light: one light sample at the hit, as wide
-                    // as the ray's footprint there, lit from both sides when
-                    // light passes through it.
+                // The sides that take a light sample of their own: every side
+                // of a cache ray's hit (its direct light is its own), a
+                // probe's that the cache has no light for (lit on the spot).
+                let sides = select(lit.own, GI_SIDE_NEAR | GI_SIDE_FAR, !probe);
+                if sides != 0u {
+                    // One light sample at the hit, as wide as the ray's
+                    // footprint there, from both sides where its far side
+                    // takes it and light passes through.
                     let u = vec2<f32>(f32(gi_hash(seed ^ 0x68e31da4u) >> 8u), f32(gi_hash(seed ^ 0xb5297a4du) >> 8u)) / 16777216.0;
-                    hit_query = light_query_point(at + eye, footprint, n, any(through > vec3<f32>(0.0)), u, gi_hash(seed), space);
+                    let both = (sides & GI_SIDE_FAR) != 0u && any(through > vec3<f32>(0.0));
+                    hit_query = light_query_point(at + eye, footprint, n, both, u, gi_hash(seed), space);
+                    pending.light = sides;
+                    waiting = probe && lit.waiting;
                     want_hit = true;
                 }
             }
@@ -215,7 +221,7 @@ fn gi_light(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     workgroupBarrier();
     var at = w_base + slot;
     if want_hit {
-        pending.row = at;
+        pending.row = at | select(0u, GI_ROW_WAITING, waiting);
         light_queries[at] = hit_query;
         at += 1u;
     }
@@ -237,18 +243,21 @@ fn gi_light_header() {
     atomicStore(&light_header[2], 1u);
 }
 
-// A workgroup of 64 cache rays.
+// A workgroup a probe's rays, then one for 64 cache rays.
 @compute @workgroup_size(64)
 fn gi_shadow(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let probe = wg.x < GI_MAX_UPDATES;
+    if probe && wg.x >= frame_gi.updated { return; }
     if li == 0u {
         atomicStore(&w_rows, 0u);
         w_cache = cache_rays_count();
     }
     let cached = workgroupUniformLoad(&w_cache);
-    if wg.x * 64u >= cached { return; }
-    let r = wg.x * 64u + li;
-    let live = r < cached;
-    let row = frame_gi.updated * GI_RAYS + r;
+    let first = (wg.x - GI_MAX_UPDATES) * 64u;
+    if !probe && first >= cached { return; }
+    let r = first + li;
+    let live = probe || r < cached;
+    let row = select(frame_gi.updated * GI_RAYS + r, wg.x * GI_RAYS + li, probe);
     var pending = GiPending(0u, 0u, 0.0, GI_NO_ROW);
     var cell = CachePending(0u, GI_NO_ROW, 0u, 0u);
     // Up to two shadow rays: the hit's, then the cell's.
@@ -257,18 +266,22 @@ fn gi_shadow(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_ind
     var count = 0u;
     if live {
         pending = gi_pending[row];
-        cell = cell_pending[r];
+        if !probe { cell = cell_pending[r]; }
         let ray = gi_rays[row];
         let space = scene_ray_space(ray);
         if pending.row != GI_NO_ROW {
-            let sample = light_samples[pending.row];
-            pending.row = GI_NO_ROW;
-            let direct = gi_hit_direct(ray_surfaces[row], sample, GI_SIDE_NEAR | GI_SIDE_FAR);
+            let sample = light_samples[pending.row & GI_ROW_INDEX];
+            let waiting = pending.row & GI_ROW_WAITING;
+            // A cache ray's light waits on no shadow ray; a probe's hit lit
+            // on the spot keeps that it was, and whether its cell was new.
+            pending.row = select(GI_NO_ROW, GI_ROW_INDEX | waiting, probe);
+            let direct = gi_hit_direct(ray_surfaces[row], sample, pending.light);
+            pending.light = 0u;
             if direct.lit {
                 let p = ray.origin + ray.dir * ray_hits[row].t;
                 first_ray = gi_shadow_ray(p + direct.side * gi_ray_offset(p), sample, scene_ray_footprint(ray, ray_hits[row].t), space);
                 pending.light = scene_pack_radiance(direct.light);
-                pending.row = 0u;
+                pending.row = waiting;
                 count = 1u;
             }
         }
@@ -308,11 +321,11 @@ fn gi_shadow(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_ind
         shadow_rays[base + 1u] = second_ray;
         shadow_hits[base + 1u] = SceneHit(0.0, 0u, 0u, 0u);
     }
-    if pending.row != GI_NO_ROW { pending.row += base; }
+    if pending.row != GI_NO_ROW && (pending.row & GI_ROW_INDEX) != GI_ROW_INDEX { pending.row += base; }
     if cell.row != GI_NO_ROW { cell.row += base; }
     if live {
         gi_pending[row] = pending;
-        cell_pending[r] = cell;
+        if !probe { cell_pending[r] = cell; }
     }
 }
 

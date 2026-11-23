@@ -158,7 +158,8 @@ fn build_update(build: &mut NodeBuild<'_, '_>) -> Result<(), String> {
     stream::trace(build, &shadows)?;
     build.graph.add_pass(Box::new(GiIntegratePass::new(
         &device,
-        answers[0].clone(),
+        answers.clone(),
+        &shadows,
         held,
     )));
     build.graph.add_pass(Box::new(RadianceCacheFold::new(

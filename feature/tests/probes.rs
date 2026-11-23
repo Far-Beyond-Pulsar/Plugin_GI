@@ -535,8 +535,9 @@ fn probes_hold_while_a_tracer_answers_short() {
 /// Each stream counts its rays into the frame's statistics: GI's stream
 /// every probe ray and the cache's (`rays.radiance_cache`, counted apart),
 /// the shadow stream the cache rays' shadow rays (its cells' and their
-/// hits', over sunlit ground: at most two a cache ray). The cache lights
-/// cells from the frame after a reader first marked them.
+/// hits', over sunlit ground: at most two a cache ray) and those of the
+/// probe rays' hits lit on the spot (at most one a probe ray). The cache
+/// lights cells from the frame after a reader first marked them.
 #[test]
 fn each_stream_counts_its_rays() {
     let setup = Setup {
@@ -564,8 +565,9 @@ fn each_stream_counts_its_rays() {
     // The ground's cells see the sun (a shadow ray each), their rays up
     // miss (none), their rays' hits on the ground from below are insides.
     assert!(
-        shadows >= cache / 2 && shadows <= 2 * cache,
-        "{shadows} shadow rays of {cache} cache rays"
+        shadows >= cache / 2 && shadows <= 2 * cache + (rays - cache),
+        "{shadows} shadow rays of {cache} cache rays and {} probe rays",
+        rays - cache
     );
 }
 

@@ -8,22 +8,26 @@
 //! published by [`crate::RadianceCache`]).
 //!
 //! [`GiLightPass`]: for each ray of GI's stream that met an outside, its
-//! hit's light from the radiance cache (a probe's hit: all of it; a cache
-//! ray's hit: its indirect part), through it from its far side and what it
-//! emits, or the sky on a miss, into `gi_pending`, every hit marking its
-//! cell in use; and for each cache ray a light query at its hit and one at
-//! its cell's point into the cache's light batch ([`crate::light_batch`]),
-//! compacted from row 0. The samplers then choose one light a query (the sun
-//! is one more of them).
+//! hit's light as `gi_hit.wgsl` lights a hit (a probe's hit: the cache's
+//! whole irradiance, or, where the cache has no light for it, lit on the
+//! spot: the probes' irradiance there and a light sample of its own; a cache
+//! ray's hit: the cache's indirect part), through it from its far side and
+//! what it emits, or the sky on a miss, into `gi_pending`, every hit marking
+//! its cell in use; and a light query for each hit that takes its own light
+//! (every cache ray's, a probe's lit on the spot) and for each cache ray's
+//! cell's point into GI's light batch ([`crate::light_batch`]), compacted
+//! from row 0. The samplers then choose one light a query (the sun is one
+//! more of them).
 //!
-//! [`GiShadowPass`]: each cache ray's samples, its hit's off the hit's
-//! surface (Lambertian on the side the light is on; through it by its
-//! transmission share from behind) into `gi_pending` and its cell's as the
-//! irradiance at the cell into `gi_cell_pending`, each waiting on a shadow
-//! ray that starts off its surface (on the side it leaves from); the shadow
-//! rays packed into the shadow stream from row 0, a workgroup's rows
-//! together. A last one-invocation dispatch writes the stream's dispatch
-//! from its count and counts it into the frame's statistics.
+//! [`GiShadowPass`]: each sample's light, a hit's off its surface on the
+//! sides that take it (`gi_hit_direct`: Lambertian on the side its ray met,
+//! through it by its transmission share from behind) into `gi_pending` and
+//! a cell's as the irradiance at the cell into `gi_cell_pending`, each
+//! waiting on a shadow ray that starts off its surface (on the side it leaves
+//! from); the shadow rays packed into the shadow stream from row 0, a
+//! workgroup's rows together. A last one-invocation dispatch writes the
+//! stream's dispatch from its count and counts it into the frame's
+//! statistics.
 
 use helio_core::{PassContext, RenderPass, Result as HelioResult};
 use helio_frame_api::lighting::sky::{
@@ -312,7 +316,7 @@ impl RenderPass for GiLightPass {
     }
 }
 
-/// The cache rays' light samples into shadow rays (module docs).
+/// GI's light samples into shadow rays (module docs).
 pub struct GiShadowPass {
     rays: Stream,
     shadows: Stream,
@@ -492,13 +496,10 @@ impl RenderPass for GiShadowPass {
         });
         pass.set_bind_group(0, Some(&group), &[]);
         pass.set_pipeline(&self.shadow);
-        // A workgroup for 64 cache rays; those past this frame's count
-        // return at once.
-        pass.dispatch_workgroups(
-            (self.cache_cells * crate::cache::RAYS_PER_CELL).div_ceil(64),
-            1,
-            1,
-        );
+        // A workgroup a probe, then one for 64 cache rays; those past this
+        // frame's counts return at once.
+        let cache_groups = (self.cache_cells * crate::cache::RAYS_PER_CELL).div_ceil(64);
+        pass.dispatch_workgroups(MAX_UPDATES + cache_groups, 1, 1);
         pass.set_pipeline(&self.header);
         pass.dispatch_workgroups(1, 1, 1);
         Ok(())
