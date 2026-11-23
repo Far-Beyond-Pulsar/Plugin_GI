@@ -87,13 +87,13 @@ phase, and holds the whole update:
    the hit's cell in use:
    - a probe's ray: `base * cache irradiance / pi + share * the far side's
      cache irradiance / pi + emission`, the cache's direct and indirect parts
-     both. Where the cache has no light for the hit within its reach (a cell
-     new this frame or the last, or one whose rays have not yet explored
-     the way to the hit), the ray is marked unlit;
+     both. Where the cache has no light for the hit within its reach, the
+     ray is marked unlit and takes a stand-in: the hit's cell's light where
+     its rays have not yet explored the way to the hit, the probes' own
+     irradiance where they found something in the way or the cell is new;
    - a cache ray: its hit's emission into `gi_pending`, and apart
      (`gi_cell_pending`) what it reflects of the cache's indirect light there
-     (the bounced part's update; the probes' irradiance where that cell has
-     no value yet), and a
+     (the bounced part's update), and a
      light query at the hit (`LightQuery`: its place, the ray's footprint
      there, its normal, lit from both sides when it lets light through, its
      space) and one at its cell's point, packed into the cache's light batch
@@ -225,16 +225,17 @@ reflections). GI publishes it (`cache.rs`, `gi_cache.wgsl`):
   buckets of 16 slots; a slot is its key's checksum and the frame it was
   last marked. A cell first marked takes the marking hit's point and normal
   and a place in the new cells' queue (after the slots: a quarter of them
-  a frame); one mark in 8 whose hit the cell's light holds at moves its
-  point there. A mark also marks the cell three levels coarser.
+  a frame); the point stays for the cell's life (its clear distances are
+  that point's). A mark also marks the cell three levels coarser.
 - **Where a cell's light holds** (`radiance_cache_holds`): each cell keeps
   how far from its point along its surface its rays found nothing in the
   way, in 8 directions (from the rays that went low, below 45 degrees over
   the surface: a wall standing there bounds a way, a ceiling far above does
-  not; a way no ray explored yet holds a quarter of the cell). A read whose
-  point is further than that reads the finer cell whose light holds there,
-  and a mark claims those finer cells: a cell wider than a thin wall or
-  slab beside it lights its own side only.
+  not; a way no ray explored yet holds a 32nd of the cell). A read whose
+  point is further than that reads the finer cell whose light holds there
+  (no finer than the eye angle's cells), and a mark claims those finer
+  cells: a cell wider than a thin wall or slab beside it lights its own
+  side only.
 - **The cells in use are a list** on the GPU (two halves, one current):
   what the last frame kept, then the queue the marks filled. Every pass
   walks it with indirect dispatches, so a frame's work follows the cells in
@@ -251,8 +252,10 @@ reflections). GI publishes it (`cache.rs`, `gi_cache.wgsl`):
   `sqrt(2 pi / 128)`.
 - **Their light** (`GiLightPass`, `GiShadowPass`): a hit's emission (the
   sky's radiance table on a miss) and light sample and shadow ray; apart,
-  what the hit reflects of the cache's own light (the probes' where its
-  cell has no value yet); the cell's own light sample and shadow ray a ray.
+  what the hit reflects of the cache's own light (none from a hit the cache
+  has no light for yet: a stand-in would carry light into the cache across
+  what its cells keep apart); the cell's own light sample and shadow ray a
+  ray.
 - **The fold** (`RadianceCacheFold`, a lane a lit cell): three parts. The
   direct (the cell's light samples) and indirect (what the hits send as
   the rays meet them) are stationary: the plain mean of their updates
