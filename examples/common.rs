@@ -167,7 +167,9 @@ type PassTimes = (
 
 /// `HELIO_CAPTURE=<png>`: a windowed example saves its frame number
 /// `HELIO_CAPTURE_FRAME` (default 240: probes, shadows and temporal
-/// effects settled) and exits. The surface needs [`Self::usage`]. With
+/// effects settled) and exits; with `HELIO_CAPTURE_FRAMES=<n>` (default 1)
+/// the `n` frames from there, as `<png>` with `_<k>` before its extension
+/// (frames to average: one frame of a stochastic estimate is noisy). The surface needs [`Self::usage`]. With
 /// `HELIO_CAPTURE_TIMINGS` set it also prints each pass's median GPU time
 /// over the frames from 60 to the capture (the renderer's timing snapshot,
 /// [`Self::timings`]): frames run as the host runs them, pipelined; and the
@@ -176,6 +178,7 @@ type PassTimes = (
 pub struct SurfaceCapture {
     path: Option<String>,
     at: u32,
+    frames: u32,
     frame: u32,
     timings: Option<PassTimes>,
 }
@@ -189,6 +192,11 @@ impl SurfaceCapture {
         Self {
             path: std::env::var("HELIO_CAPTURE").ok(),
             at,
+            frames: std::env::var("HELIO_CAPTURE_FRAMES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1u32)
+                .max(1),
             frame: 0,
             timings: std::env::var_os("HELIO_CAPTURE_TIMINGS").map(|_| (Vec::new(), None, None)),
         }
@@ -283,8 +291,9 @@ impl SurfaceCapture {
         result
     }
 
-    /// After a frame is rendered into `texture`: on the frame asked for,
-    /// saves it (RGBA8 or BGRA8) and returns true (the example then exits).
+    /// After a frame is rendered into `texture`: on the frames asked for,
+    /// saves it (RGBA8 or BGRA8); returns true after the last (the example
+    /// then exits).
     pub fn frame(
         &mut self,
         device: &wgpu::Device,
@@ -292,8 +301,22 @@ impl SurfaceCapture {
         texture: &wgpu::Texture,
     ) -> bool {
         self.frame += 1;
-        let Some(path) = self.path.as_deref().filter(|_| self.frame == self.at) else {
+        let Some(path) = self
+            .path
+            .clone()
+            .filter(|_| (self.at..self.at + self.frames).contains(&self.frame))
+        else {
             return false;
+        };
+        let last = self.frame + 1 == self.at + self.frames;
+        let path = if self.frames > 1 {
+            let k = self.frame - self.at;
+            match path.rsplit_once('.') {
+                Some((stem, ext)) => format!("{stem}_{k}.{ext}"),
+                None => format!("{path}_{k}"),
+            }
+        } else {
+            path
         };
         let (width, height) = (texture.width(), texture.height());
         let row = (width * 4).div_ceil(256) * 256;
@@ -343,10 +366,12 @@ impl SurfaceCapture {
                 });
             }
         }
-        image::save_buffer(path, &pixels, width, height, image::ColorType::Rgba8).unwrap();
+        image::save_buffer(&path, &pixels, width, height, image::ColorType::Rgba8).unwrap();
         println!("[capture] frame {} -> {path}", self.frame);
-        self.print_timings();
-        true
+        if last {
+            self.print_timings();
+        }
+        last
     }
 }
 
