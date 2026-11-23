@@ -45,12 +45,12 @@ const RADIANCE_CACHE_VIEW: u32 = 39u;
 const GI_NEAR_FIELD_VIEW: u32 = 37u;
 const PI: f32 = 3.14159265;
 
-// The cache's cell a ray of footprint `footprint` meeting frame point `p`
-// with normal `n` reads (in the camera's space), as `gi_irradiance` holds
-// light: its irradiance / pi, weight 0 where no cell holds a value; darker
-// toward its cell's edges (along the two axes across its side).
-fn cache_view(p: vec3<f32>, n: vec3<f32>, footprint: f32) -> vec4<f32> {
-    let c = radiance_cache_read(p, n, footprint, cameras[0].view_info.w, RADIANCE_CACHE_LEVELS, RADIANCE_CACHE_FAR);
+// The cache's cell a ray meeting frame point `p` with normal `n` reads (in
+// the camera's space, any reach), as `gi_irradiance` holds light: its
+// irradiance / pi, weight 0 where no cell holds a value; darker toward its
+// cell's edges (along the two axes across its side).
+fn cache_view(p: vec3<f32>, n: vec3<f32>) -> vec4<f32> {
+    let c = radiance_cache_read(p, n, cameras[0].view_info.w, RADIANCE_CACHE_FAR);
     if !c.found { return vec4<f32>(0.0); }
     let q = radiance_cache_cells(p, c.level);
     let f = abs(q - floor(q) - 0.5);
@@ -118,18 +118,11 @@ fn pixel_at(id: vec2<u32>, size: vec2<u32>) -> Pixel {
 }
 
 // The probes' irradiance / pi at a pixel, or its debug views'.
-fn probes_at(id: vec2<u32>, size: vec2<u32>, px: Pixel) -> vec4<f32> {
+fn probes_at(px: Pixel) -> vec4<f32> {
     let p = px.position - cameras[0].position_near.xyz;
     var e = gi_irradiance(p, px.normal);
     if resolve_view.x == GI_PROBES_VIEW { e = vec4<f32>(probe_view(p, px.normal), 1.0); }
-    if resolve_view.x == RADIANCE_CACHE_VIEW {
-        // A pixel's footprint: the next pixel's point at this depth.
-        let depth = textureLoad(gbuf_depth, vec2<i32>(id), 0);
-        let uv = (vec2<f32>(id) + 0.5) / vec2<f32>(size);
-        let h = cameras[0].view_proj_inv * vec4<f32>(helio_uv_to_ndc(uv), depth, 1.0);
-        let next = cameras[0].view_proj_inv * vec4<f32>(helio_uv_to_ndc(uv + vec2<f32>(1.0 / f32(size.x), 0.0)), depth, 1.0);
-        e = cache_view(px.position, px.normal, length(next.xyz / next.w - h.xyz / h.w));
-    }
+    if resolve_view.x == RADIANCE_CACHE_VIEW { e = cache_view(px.position, px.normal); }
     return e;
 }
 
@@ -147,7 +140,7 @@ fn gi_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
         out_irradiance[at] = vec2<u32>(0u);
         return;
     }
-    store(at, probes_at(id.xy, size, px));
+    store(at, probes_at(px));
 }
 
 // The gathered irradiance at pixel `id` (normal `n`), or below 0 where the
@@ -183,7 +176,7 @@ fn gi_resolve_pixels(@builtin(global_invocation_id) id: vec3<u32>) {
         e = gathered_at(id.xy, size, px.normal);
     }
     if e.w < 0.0 {
-        store(at, probes_at(id.xy, size, px));
+        store(at, probes_at(px));
         return;
     }
     let near = textureLoad(near_field, vec2<i32>(id.xy), 0).y;

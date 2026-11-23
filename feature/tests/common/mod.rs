@@ -524,13 +524,13 @@ impl RenderPass for Capture {
 }
 
 /// A point a test reads the radiance cache at: a world point, the unit
-/// normal of the side it is seen from, the footprint of the ray that would
-/// read it and the ray's coordinate space (`SceneRay::space`).
+/// normal of the side it is seen from and the ray's coordinate space
+/// (`SceneRay::space`). The level is the surface's (the eye's distance), as
+/// for every reader.
 #[derive(Clone, Copy, Debug)]
 pub struct CacheQuery {
     pub world: DVec3,
     pub normal: Vec3,
-    pub footprint: f32,
     pub space: u32,
 }
 
@@ -574,9 +574,9 @@ fn read_cache(@builtin(global_invocation_id) id: vec3<u32>) {
     if i >= info.x { return; }
     let q = queries[i];
     let space = bitcast<u32>(q.n.w);
-    let e = radiance_cache_read(q.p.xyz, q.n.xyz, q.p.w, space, RADIANCE_CACHE_LEVELS, RADIANCE_CACHE_FAR);
+    let e = radiance_cache_read(q.p.xyz, q.n.xyz, space, RADIANCE_CACHE_FAR);
     var history = vec2<f32>(0.0);
-    let s = radiance_cache_find(radiance_cache_key(q.p.xyz, q.n.xyz, radiance_cache_level(q.p.xyz, q.p.w), space));
+    let s = radiance_cache_find(radiance_cache_key(q.p.xyz, q.n.xyz, radiance_cache_level(q.p.xyz), space));
     if s != RADIANCE_CACHE_NONE {
         let h = radiance_cache_entries[s].history;
         history = vec2<f32>(f32(h & 0xffu), f32((h >> 8u) & 0xffu));
@@ -584,7 +584,7 @@ fn read_cache(@builtin(global_invocation_id) id: vec3<u32>) {
     out[i * 3u] = vec4<f32>(e.direct, select(-1.0, f32(e.level), e.found));
     out[i * 3u + 1u] = vec4<f32>(e.indirect, 0.0);
     out[i * 3u + 2u] = vec4<f32>(history, 0.0, 0.0);
-    if info.y != 0u { radiance_cache_mark(q.p.xyz, q.n.xyz, q.p.w, space, RADIANCE_CACHE_FAR); }
+    if info.y != 0u { radiance_cache_mark(q.p.xyz, q.n.xyz, space, RADIANCE_CACHE_FAR); }
 }
 "#;
 
@@ -705,7 +705,7 @@ impl RenderPass for CacheReader {
                     p.x,
                     p.y,
                     p.z,
-                    q.footprint,
+                    0.0,
                     q.normal.x,
                     q.normal.y,
                     q.normal.z,

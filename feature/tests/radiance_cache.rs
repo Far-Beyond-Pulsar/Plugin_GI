@@ -13,7 +13,7 @@ use common::{gpu, CacheQuery, CacheRead, Harness, Setup, Shape};
 use glam::{DVec3, Vec3};
 use helio_frame_api::rays::stream::space_of_slot;
 use helio_pass_gi::cache::{refresh_period, EVICT_AGE, HISTORY_MAX, HISTORY_MIN};
-use helio_pass_gi::GiSettings;
+use helio_pass_gi::{CacheConfig, GiSettings};
 
 const PI: f64 = std::f64::consts::PI;
 /// Base colour 128/255 (RGB8 in a surface).
@@ -260,10 +260,10 @@ fn the_cpu_radiosity_conserves_energy() {
 }
 
 /// The lit box: a room 6 x 4 x 6 m of albedo 128/255 about the eye, a point
-/// light a metre over it; four wall points, read as a pixel's ray (a 5 mm
-/// footprint) would read them, in the world's coordinate space (the probes'
-/// rays are in every space's, so the points' cells are the reader's alone,
-/// their points the reader's).
+/// light a metre over it; four wall points, read as a pixel's ray would read
+/// them, in the world's coordinate space (the probes' rays are in every
+/// space's, so the points' cells are the reader's alone, their points the
+/// reader's).
 struct LitBox {
     lo: DVec3,
     hi: DVec3,
@@ -283,7 +283,6 @@ fn lit_box(setup: &Setup) -> LitBox {
     let query = |offset: DVec3, normal: Vec3| CacheQuery {
         world: c + offset,
         normal,
-        footprint: 0.005,
         space: space_of_slot(0),
     };
     LitBox {
@@ -371,17 +370,19 @@ fn a_lit_box_converges_to_its_radiosity_solution() {
 }
 
 /// A plate 5 cm thick under the sun, black ground below and no sky: the
-/// plate's two sides at one place, read with a metre's footprint (one cell
-/// far wider than the plate), stay apart: the top holds the sun's 2, the
-/// underside, which sees nothing lit, nothing at all.
+/// plate's two sides at one place, read from 25 m away (the eye angle's cell
+/// there a metre wide, far wider than the plate), stay apart: the top holds
+/// the sun's 2, the underside, which sees nothing lit, nothing at all.
 #[test]
 fn a_thin_wall_s_two_sides_stay_apart() {
-    let setup = Setup {
+    let mut setup = Setup {
         sun: Some(2.0),
         ..Default::default()
     };
     let c = setup.world_eye();
     let y = c.y + 1.0;
+    // The eye beside the plate, a metre's cell away.
+    setup.eye += Vec3::new(1.0 / CacheConfig::default().eye_angle(), 0.0, 0.0);
     let plate = Shape::solid(
         DVec3::new(c.x - 5.0, y, c.z - 5.0),
         DVec3::new(c.x + 5.0, y + 0.05, c.z + 5.0),
@@ -394,7 +395,6 @@ fn a_thin_wall_s_two_sides_stay_apart() {
     let side = |at_y: f64, normal: Vec3| CacheQuery {
         world: DVec3::new(c.x + 0.7, at_y, c.z - 0.4),
         normal,
-        footprint: 1.0,
         space: space_of_slot(0),
     };
     h.read_cache(vec![side(y + 0.05, Vec3::Y), side(y, Vec3::NEG_Y)], true);
@@ -408,19 +408,23 @@ fn a_thin_wall_s_two_sides_stay_apart() {
 }
 
 /// The lit box split by a wall 5 cm thick, the light on one side: the far
-/// side gets no light at all. Read on the dark side next to the wall at
-/// footprints from 1/8 m to 4 m, so each read's cell is wider than the wall
+/// side gets no light at all. Read on the dark side next to the wall with
+/// the eye as far from the reads as makes their surfaces' cells 1/8 m to
+/// 4 m wide (the eye angle's), so each read's cell is wider than the wall
 /// and holds both sides (the lit side's cells marked by the probes' and the
 /// cache's rays, read on the lit side too): the dark reads find their own
 /// side's cells, which hold under 1% of the lit side's light (without the
 /// cells' clear distances the dark side reads the lit side's whole light
-/// from 1/4 m up; the 0.2% left at 1/8 m is not the cache's straddling:
-/// its source is open). Twice: a wall standing on the floor (the floor's
-/// cells across it) and a slab across the box (the walls' cells across it).
+/// from 1/4 m up). Twice: a wall standing on the floor (the floor's cells
+/// across it) and a slab across the box (the walls' cells across it).
 #[test]
 fn a_wall_thinner_than_its_cells_keeps_its_light_on_its_side() {
-    for vertical in [true, false] {
-        let (setup, b) = lit_box_setup(DVec3::new(1000.0, 2.0, -500.0));
+    let angle = f64::from(CacheConfig::default().eye_angle());
+    for (vertical, size) in [true, false]
+        .into_iter()
+        .flat_map(|v| [0.125f64, 0.25, 0.5, 1.0, 2.0, 4.0].map(|s| (v, s)))
+    {
+        let (mut setup, b) = lit_box_setup(DVec3::new(1000.0, 2.0, -500.0));
         let c = setup.world_eye();
         // World 1001.3 to 1001.35 (or 2.3 to 2.35 up): inside a cell of
         // every level from 1/8 m to 4 m. Into the room's walls by 10 cm, so
@@ -450,43 +454,36 @@ fn a_wall_thinner_than_its_cells_keeps_its_light_on_its_side() {
                 Vec3::NEG_X,
             )
         };
+        // The eye `size / angle` from the reads, along the reads' normal.
+        let between = (lit + dark) / 2.0;
+        let eye = between + normal.as_dvec3() * (size / angle);
+        setup.eye = (eye - setup.origin).as_vec3();
         let Some(mut h) = harness(setup, vec![Shape::room(b.lo, b.hi, HALF), wall]) else {
             return;
         };
-        let footprints = [0.125f32, 0.25, 0.5, 1.0, 2.0, 4.0];
-        let read = |at: DVec3, footprint: f32| CacheQuery {
+        let read = |at: DVec3| CacheQuery {
             world: at,
             normal,
-            footprint,
             space: space_of_slot(0),
         };
-        let queries: Vec<CacheQuery> = footprints
-            .iter()
-            .flat_map(|&f| [read(lit, f), read(dark, f)])
-            .collect();
-        h.read_cache(queries, true);
+        h.read_cache(vec![read(lit), read(dark)], true);
         settle(&mut h, "the split box settles");
         let means = mean_reads(&mut h, 32);
         let reads = h.cache_reads();
-        for (k, &f) in footprints.iter().enumerate() {
-            let (lit_light, dark_light) = (
-                means[2 * k].0 + means[2 * k].1,
-                means[2 * k + 1].0 + means[2 * k + 1].1,
-            );
-            println!(
-                "{} wall, footprint {f} m: lit {} (level {:?}), dark {} (level {:?})",
-                if vertical { "standing" } else { "lying" },
-                lit_light.x,
-                reads[2 * k].level,
-                dark_light.x,
-                reads[2 * k + 1].level
-            );
-            assert!(lit_light.x > 0.1, "the lit side at {f} m: {lit_light}");
-            assert!(
-                dark_light.max_element() < 0.01 * lit_light.min_element(),
-                "the dark side at {f} m: {dark_light} (lit {lit_light})"
-            );
-        }
+        let (lit_light, dark_light) = (means[0].0 + means[0].1, means[1].0 + means[1].1);
+        println!(
+            "{} wall, {size} m cells: lit {} (level {:?}), dark {} (level {:?})",
+            if vertical { "standing" } else { "lying" },
+            lit_light.x,
+            reads[0].level,
+            dark_light.x,
+            reads[1].level
+        );
+        assert!(lit_light.x > 0.1, "the lit side at {size} m: {lit_light}");
+        assert!(
+            dark_light.max_element() < 0.01 * lit_light.min_element(),
+            "the dark side at {size} m: {dark_light} (lit {lit_light})"
+        );
     }
 }
 
@@ -538,7 +535,6 @@ fn furnace(setup: &Setup, albedo: f32) -> (Shape, Vec<CacheQuery>) {
     let query = |offset: DVec3, normal: Vec3| CacheQuery {
         world: c + offset,
         normal,
-        footprint: 0.1,
         space: 0,
     };
     (
@@ -696,9 +692,9 @@ fn a_small_cache_evicts_and_reuses_its_slots() {
     let probes = h.frame_stats().get("radiance_cache.cells").unwrap_or(0) as usize;
     // 30 floor points a metre apart in each of `spaces` coordinate spaces a
     // set (rays of those spaces see nothing: a miss, an empty sky, lights
-    // them black: found, holding 0); a space's points key about 33 cells
-    // with their ancestors.
-    let spaces = ((slots * 45 / 100).saturating_sub(probes) / 33).max(8) as u32;
+    // them black: found, holding 0); a space's points key 30 cells (one
+    // level a surface).
+    let spaces = ((slots * 45 / 100).saturating_sub(probes) / 30).max(8) as u32;
     println!("{probes} probe cells; sets of {spaces} spaces");
     let set = |first: u32| -> Vec<CacheQuery> {
         (0..spaces)
@@ -706,7 +702,6 @@ fn a_small_cache_evicts_and_reuses_its_slots() {
                 (0..30).map(move |i| CacheQuery {
                     world: c + DVec3::new(f64::from(i % 6) - 2.5, -1.5, f64::from(i / 6) - 2.0),
                     normal: Vec3::Y,
-                    footprint: 0.01,
                     space: space_of_slot(first + k),
                 })
             })
@@ -785,7 +780,6 @@ fn two_spaces_at_one_place_do_not_mix() {
     let query = |slot: u32| CacheQuery {
         world: c + DVec3::new(1.0, -20.0, 2.0),
         normal: Vec3::Y,
-        footprint: 0.1,
         space: space_of_slot(slot),
     };
     h.read_cache(vec![query(1), query(2)], true);

@@ -158,11 +158,15 @@ fn gi_light(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
                 let n = s.normal;
                 let footprint = width + spread * hit.t;
                 let through = surface_transmission(s);
-                // The reach (`radiance_cache_read`): a probe is in the air;
-                // a cache ray left its cell's surface, which is in its hit's
-                // way at the ray's length.
-                let reach = select(t, RADIANCE_CACHE_FAR, probe);
-                let lit = gi_hit_light(at, dir, surface, footprint, space, reach, !probe, false, true);
+                // The reach (`radiance_cache_read`): any. A probe is in the
+                // air; a cache ray's hit's cell is the bounced part's, a
+                // bounce on from the cell's own rays, whose error a cell's
+                // point a little past the ray's length moves by a second
+                // order (as SHaRC's and GI-1.0's secondary hits read their
+                // grids), where keeping finer cells at every contact the
+                // cache's rays meet would multiply its working set.
+                let reach = RADIANCE_CACHE_FAR;
+                let lit = gi_hit_light(at, dir, surface, space, reach, !probe, false, true);
                 bounced = lit.reflected;
                 rest = lit.emitted;
                 // A probe takes the hit's whole light; a cache ray's cell

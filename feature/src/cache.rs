@@ -73,7 +73,10 @@
 //!   leaves between two reads of a cell it keeps reading (a probe of GI's
 //!   coarser levels is updated every 41 frames), so no cell a reader still
 //!   uses goes; past half the slots the least recently used go too, keeping
-//!   buckets' room (a bucket of 16 at half load is full for 0.4% of keys).
+//!   buckets' room (a bucket of 16 at half load is full for 0.4% of keys),
+//!   but never one marked within half that (64 frames, still past the
+//!   probes' longest period): a still camera's readers come back to every
+//!   cell they read, so the working set holds still.
 //! - The eye angle ([`CacheConfig::eye_angle`]): cells at least `a * d` wide
 //!   at a distance `d` from the eye hold at most `4 pi / a^2` cells a level
 //!   for surfaces all around the eye; over the levels that is half the
@@ -208,8 +211,9 @@ impl CacheConfig {
 }
 
 /// The snippets `gi_cache.wgsl` is built with.
-pub(crate) const SNIPPETS: [helio_core::shader::ShaderSnippet; 6] = [
+pub(crate) const SNIPPETS: [helio_core::shader::ShaderSnippet; 7] = [
     stream::SNIPPET,
+    stream::SURFACE_SNIPPET,
     radiance_cache::SNIPPET,
     helio_frame_api::gbuffer::SURFACE_SNIPPET,
     helio_frame_api::gbuffer::BSDF_SNIPPET,
@@ -528,6 +532,8 @@ pub struct RadianceCacheFold {
     /// GI's stream's answers and the shadow stream's.
     answers: [Arc<stream::Answers>; 2],
     shadow_hits: &'static str,
+    /// GI's stream's surfaces (a cache ray's hit's face).
+    surfaces: Option<&'static str>,
     layout: wgpu::BindGroupLayout,
     pipeline: wgpu::ComputePipeline,
     stats: wgpu::Buffer,
@@ -558,6 +564,7 @@ impl RadianceCacheFold {
                 storage(13, true),
                 storage(14, true),
                 storage(15, true),
+                storage(16, true),
             ],
         });
         let module = module(device);
@@ -569,20 +576,26 @@ impl RadianceCacheFold {
             config,
             answers,
             shadow_hits: shadows.hits,
+            surfaces: rays.surfaces,
             stats: stats.buffer().clone(),
             cache: helio_core::gpu_cache::GpuCache::new(),
-            reads: helio_frame_api::static_names(&[
-                FRAME,
-                ENTRIES,
-                CACHE_LIFE,
-                CACHE_PLAN,
-                CACHE_LIST,
-                GI_FRAME,
-                GI_PENDING,
-                CELL_PENDING,
-                GI_ANSWERED,
-                shadows.hits,
-            ]),
+            reads: helio_frame_api::static_names(
+                &[
+                    FRAME,
+                    ENTRIES,
+                    CACHE_LIFE,
+                    CACHE_PLAN,
+                    CACHE_LIST,
+                    GI_FRAME,
+                    GI_PENDING,
+                    CELL_PENDING,
+                    GI_ANSWERED,
+                    shadows.hits,
+                ]
+                .into_iter()
+                .chain(rays.surfaces)
+                .collect::<Vec<_>>(),
+            ),
         }
     }
 }
@@ -616,6 +629,7 @@ impl RenderPass for RadianceCacheFold {
             Some(cells),
             Some(shadows),
             Some(answered),
+            Some(surfaces),
         ) = (
             binding(FRAME),
             binding(ENTRIES),
@@ -627,6 +641,7 @@ impl RenderPass for RadianceCacheFold {
             binding(CELL_PENDING),
             binding(self.shadow_hits),
             binding(GI_ANSWERED),
+            self.surfaces.and_then(binding),
         )
         else {
             return Ok(());
@@ -649,6 +664,7 @@ impl RenderPass for RadianceCacheFold {
                     entry(13, cells),
                     entry(14, shadows),
                     entry(15, answered),
+                    entry(16, surfaces),
                 ],
             },
         );
@@ -689,6 +705,10 @@ mod tests {
             ("CACHE_DETECT", format!("{DETECT}u")),
             ("CACHE_SPREAD", format!("{SPREAD}")),
             ("CACHE_CLEAR_GROWTH", format!("{CLEAR_GROWTH}")),
+            (
+                "CACHE_REVISIT_BIN",
+                format!("{}u", (EVICT_AGE / 2).trailing_zeros() + 1),
+            ),
         ] {
             assert!(
                 source.contains(&format!("const {name}: "))

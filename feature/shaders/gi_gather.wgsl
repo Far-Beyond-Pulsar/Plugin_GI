@@ -653,8 +653,8 @@ fn block_reach(footprint: f32) -> f32 {
 // The luminance of the cache's whole light at a hit (the front side's cell,
 // read without claiming it, as a reader in the air: a light that changed
 // shows wherever the cell holds), what a re-trace compares; 0 where none.
-fn cache_luminance(point: vec3<f32>, side: vec3<f32>, surface: SceneSurface, footprint: f32, space: u32) -> f32 {
-    let c = radiance_cache_read(point, side, footprint, space, GI_CACHE_REACH, RADIANCE_CACHE_FAR);
+fn cache_luminance(point: vec3<f32>, side: vec3<f32>, surface: SceneSurface, space: u32) -> f32 {
+    let c = radiance_cache_read(point, side, space, RADIANCE_CACHE_FAR);
     if !c.found { return 0.0; }
     let s = scene_surface_unpack(surface);
     return luminance(s.albedo.rgb * (c.direct + c.indirect) / PI + s.emissive);
@@ -715,9 +715,9 @@ fn gather_hits(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invo
             let surface = surfaces[i];
             let footprint = scene_ray_footprint(ray, m.t);
             let space = scene_ray_space(ray);
-            let lit = gi_hit_light(m.point - eye, ray.dir, surface, footprint, space, m.t, false, true, true);
+            let lit = gi_hit_light(m.point - eye, ray.dir, surface, space, m.t, false, true, true);
             light.rest = scene_pack_radiance(lit.reflected + lit.emitted);
-            light.cache_y = cache_luminance(m.point, m.normal, surface, footprint, space);
+            light.cache_y = cache_luminance(m.point, m.normal, surface, space);
             if lit.own != 0u {
                 // A side the cache has no light for: its own light sample,
                 // two-sided where its far side lights itself.
@@ -852,7 +852,7 @@ fn gather_validate(@builtin(global_invocation_id) id: vec3<u32>) {
         let expected = distance(r.sample, ray.origin);
         same = abs(m.t - expected) <= 2.0 * gi_ray_offset(m.point) + expected / 256.0;
         noise = CACHE_NOISE;
-        now = cache_luminance(m.point, m.normal, surfaces[row], scene_ray_footprint(ray, m.t), scene_ray_space(ray));
+        now = cache_luminance(m.point, m.normal, surfaces[row], scene_ray_space(ray));
     }
     var confidence = 0.0;
     if same {

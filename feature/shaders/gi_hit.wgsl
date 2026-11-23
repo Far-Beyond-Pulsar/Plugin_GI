@@ -19,12 +19,6 @@ fn gi_sky_radiance(from_camera: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
     return sky_radiance_eval(from_camera, d);
 }
 
-// How many levels coarser than its own cell a GI ray's hit may read while
-// its cell has no value: one, a cell twice as wide. Coarser ones (a mark's
-// ancestor is 8 times wider) span thin walls and floors under them, so a
-// probe's first update would take both sides' light into its history.
-const GI_CACHE_REACH: u32 = 1u;
-
 // A side of a hit as the cache holds it (`gi_hit_cell`): its irradiance / pi
 // from the lights (`direct`) and from everything else (`indirect`); `w` 1
 // where the cache has light for the hit, 0.5 where a cell's stand-in stood
@@ -36,11 +30,11 @@ struct GiHitCell {
     w: f32,
 }
 
-// The cache at eye-relative hit `at` on the side of unit `side` for a ray of
-// footprint `footprint` in space `space` whose reader reaches `reach`
-// (`radiance_cache_read`: the ray's length for a ray that left a surface,
-// RADIANCE_CACHE_FAR for a probe's), marking its cell when `mark`.
-// Where it has no light for the hit within GI_CACHE_REACH, a stand-in: the
+// The cache at eye-relative hit `at` on the side of unit `side` in space
+// `space` for a reader of reach `reach` (`radiance_cache_read`: the ray's
+// length for a ray that left a surface, RADIANCE_CACHE_FAR for a probe's),
+// marking its cell when `mark`.
+// Where it has no light for the hit, a stand-in: the
 // hit's own cell's light where its rays have not yet explored the way to
 // the hit (a few updates: the hits that lack light are the ones near what
 // splits a cell, darker than most, which leaving out would brighten what
@@ -48,13 +42,13 @@ struct GiHitCell {
 // occluder or the reach, its finer cell new this frame or the last), the
 // probes' at the hit toward `n` (their own previous state), never that
 // cell's light from the occluder's other side.
-fn gi_hit_cell(at: vec3<f32>, side: vec3<f32>, n: vec3<f32>, footprint: f32, space: u32, reach: f32, mark: bool) -> GiHitCell {
+fn gi_hit_cell(at: vec3<f32>, side: vec3<f32>, n: vec3<f32>, space: u32, reach: f32, mark: bool) -> GiHitCell {
     let p = at + gi_trace.eye.xyz;
-    let c = radiance_cache_read(p, side, footprint, space, GI_CACHE_REACH, reach);
-    if mark { radiance_cache_mark(p, side, footprint, space, reach); }
+    let c = radiance_cache_read(p, side, space, reach);
+    if mark { radiance_cache_mark(p, side, space, reach); }
     if c.found { return GiHitCell(c.direct / PI, c.indirect / PI, 1.0); }
     if radiance_cache_present() {
-        let s = radiance_cache_find(radiance_cache_key(p, side, radiance_cache_level(p, footprint), space));
+        let s = radiance_cache_find(radiance_cache_key(p, side, radiance_cache_level(p), space));
         if s != RADIANCE_CACHE_NONE && radiance_cache_has_value(radiance_cache_entries[s])
             && radiance_cache_light_at(radiance_cache_entries[s], p, reach) == RADIANCE_CACHE_UNKNOWN {
             let e = radiance_cache_entries[s];
@@ -99,12 +93,12 @@ struct GiHitLight {
 // what lets light through (a voxel of leaves: a cell seated there would
 // start its rays in it). The far side's cells are the ones rays from that
 // side make.
-fn gi_hit_light(at: vec3<f32>, dir: vec3<f32>, surface: SceneSurface, footprint: f32, space: u32, reach: f32, indirect_only: bool, own_light: bool, mark: bool) -> GiHitLight {
+fn gi_hit_light(at: vec3<f32>, dir: vec3<f32>, surface: SceneSurface, space: u32, reach: f32, indirect_only: bool, own_light: bool, mark: bool) -> GiHitLight {
     let s = scene_surface_unpack(surface);
     let face = scene_surface_face(surface);
     let side = select(face, -face, dot(face, dir) > 0.0);
     let through = surface_transmission(s);
-    let front = gi_hit_cell(at, side, s.normal, footprint, space, reach, mark);
+    let front = gi_hit_cell(at, side, s.normal, space, reach, mark);
     let dark = all(s.albedo.rgb == vec3<f32>(0.0));
     var lit = GiHitLight(vec3<f32>(0.0), s.emissive, front.w == 1.0 || dark, front.w > 0.0 || dark, 0u);
     let front_own = own_light && front.w < 1.0 && !dark;
@@ -112,7 +106,7 @@ fn gi_hit_light(at: vec3<f32>, dir: vec3<f32>, surface: SceneSurface, footprint:
     lit.reflected = s.albedo.rgb * (front.indirect + select(vec3<f32>(0.0), front.direct, front_direct));
     if front_own { lit.own |= GI_SIDE_NEAR; }
     if any(through > vec3<f32>(0.0)) {
-        let back = gi_hit_cell(at, -side, -s.normal, footprint, space, reach, false);
+        let back = gi_hit_cell(at, -side, -s.normal, space, reach, false);
         let back_own = own_light && back.w < 1.0;
         let back_direct = !indirect_only && !back_own;
         lit.reflected += through * (back.indirect + select(vec3<f32>(0.0), back.direct, back_direct));

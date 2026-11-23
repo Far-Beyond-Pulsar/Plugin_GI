@@ -1,4 +1,5 @@
 //!use frame_ray_stream
+//!use frame_ray_surface
 //!use frame_radiance_cache
 //!use frame_surface
 //!use frame_bsdf
@@ -58,6 +59,9 @@
 @group(0) @binding(13) var<storage, read> cell_pending: array<CachePending>;
 @group(0) @binding(14) var<storage, read> shadow_hits: array<SceneHit>;
 @group(0) @binding(15) var<storage, read> gi_answered: array<u32, 4>;
+// GI's stream's surfaces (the fold's: a cache ray's hit's face, for its
+// cell's clear distances).
+@group(0) @binding(16) var<storage, read> ray_surfaces: array<SceneSurface>;
 
 // Cells lit a frame at most (the ray budget over CACHE_RAYS).
 override CACHE_CELLS: u32 = 8192u;
@@ -80,8 +84,11 @@ const CACHE_HISTORY_MAX: u32 = 64u;
 const CACHE_ERROR: f32 = 0.03;
 const CACHE_BOUNCED: u32 = 16u;
 // Frames unused before a cell goes (`cache::EVICT_AGE`), as a histogram
-// bin: ages 128 to 255.
+// bin: ages 128 to 255. Past half the slots, the least recently used go too,
+// but never a cell marked within half that (ages under 64, bin 7 and up go):
+// longer than any reader goes between two reads of a cell it keeps reading.
 const CACHE_EVICT_BIN: u32 = 8u;
+const CACHE_REVISIT_BIN: u32 = 7u;
 // The fold's change test (`cache.rs`): a fast (CACHE_FAST updates) and a
 // slow (the history's) mean of each update's luminance, clamped from above at
 // the fast mean plus CACHE_CLAMP mean absolute deviations, apart by more than
@@ -253,13 +260,13 @@ fn cache_scan(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invoc
 @compute @workgroup_size(1)
 fn cache_plan_main() {
     // What goes: unused for CACHE_EVICT_AGE frames; past half the slots, the
-    // least recently used too (whole bins, never those used this frame or
-    // the last), so a new cell's bucket keeps room.
+    // least recently used too (whole bins, never those a reader may still
+    // come back to: CACHE_REVISIT_BIN), so a new cell's bucket keeps room.
     var evict = CACHE_EVICT_BIN;
     var kept = 0u;
     for (var b = 0u; b < CACHE_EVICT_BIN; b++) { kept += atomicLoad(&cache_plan[32u + b]); }
     let load = radiance_cache_frame.origin_z.z / 2u;
-    while kept > load && evict > 2u {
+    while kept > load && evict > CACHE_REVISIT_BIN {
         evict -= 1u;
         kept -= atomicLoad(&cache_plan[32u + evict]);
     }
@@ -495,12 +502,24 @@ fn cache_fold(@builtin(global_invocation_id) id: vec3<u32>) {
         // A ray that goes low (below 45 degrees over the cell's surface)
         // explores its way: a hit bounds it (a wall standing there), a miss
         // leaves it open. A ray higher up says nothing of the surface (a
-        // ceiling over a floor is no occluder along it).
+        // ceiling over a floor is no occluder along it). The bound is where
+        // the plane of the face it met crosses the cell's surface, no farther
+        // than the hit: a way is 45 degrees wide, and the hit of a ray off
+        // its middle lies past the face's foot (up to 8% for a wall square
+        // to the way), where a reader just behind a thin wall stands.
         let dir = cell_dir(slot, k, normal);
         let flat = radiance_cache_along(normal, dir);
         if dot(dir, normal) <= flat.y {
             let w = u32(flat.x);
-            let reach = select(RADIANCE_CACHE_FAR, flat.y * pending.t, pending.t > 0.0);
+            var reach = RADIANCE_CACHE_FAR;
+            if pending.t > 0.0 {
+                reach = flat.y * pending.t;
+                // The face's distance from the point, over how fast that
+                // distance changes along the cell's surface.
+                let face = scene_surface_face(ray_surfaces[frame_gi.updated * GI_RAYS + r]);
+                let across = length(face - normal * dot(face, normal));
+                if across > 1e-3 { reach = min(reach, abs(dot(dir, face)) * pending.t / across); }
+            }
             clear[w] = select(min(clear[w], reach), reach, clear[w] == 0.0);
         }
         var l = scene_unpack_radiance(pending.rest);

@@ -267,9 +267,9 @@ fn the_sun_on_the_ground_lights_probes_from_below() {
 
 /// The irradiance / pi facing down of the probe at world `at` (a probe of
 /// the finest level), once it has taken `updates` updates: its first may
-/// come while the cells its rays meet are new, answered from cells 8 times
-/// wider (`radiance_cache::ANCESTOR`), which a shadow's edge smears; the
-/// updates after read their own.
+/// come while some cells its rays meet are new (those hits lit on the spot,
+/// their indirect light the probes' own, still empty); the updates after
+/// read the cells.
 fn down_at(h: &mut Harness, at: DVec3, updates: u32) -> Vec3 {
     let clipmap = h.clipmap();
     let index = helio_pass_gi::Clipmap::index(0, (at / clipmap.finest).round().as_i64vec3());
