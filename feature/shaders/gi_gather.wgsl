@@ -31,12 +31,12 @@
 // - `gather_rays` (a texel): its traced pixel's ray (cosine about the
 //   pixel's normal) into the stream `gi_pixels`, and for one reservoir in
 //   GATHER period, a ray re-tracing its kept sample.
-// - `gather_hits` (a texel): its ray's hit lit from the radiance cache where
-//   the cell is no wider than the ray is long (a cell wider than that
-//   averages light the hit does not see: the floor beyond a contact, the
-//   lit side of a thin wall); elsewhere the cell's indirect part, read
-//   without claiming the cell, and a light query for the hit's own direct
-//   light (`gi_pixels` light batch).
+// - `gather_hits` (a texel): its ray's hit lit as GI lights a hit
+//   (`gi_hit_light`), the ray's length its reach (a cell's light gathered
+//   farther from the hit than that is light the hit does not see from where
+//   it is: the floor beyond a contact, the lit side of a thin wall); a side
+//   the cache has no light for takes the probes' irradiance and a light
+//   query for its own direct light (`gi_pixels` light batch).
 // - `gather_shadow` (a query): its light sample's light at the hit, waiting
 //   on a shadow ray (`gi_pixels_shadow`).
 // - `gather_validate` (a texel): a re-traced sample's light now; a sample
@@ -116,9 +116,10 @@ struct Res {
 // A texel's light at its ray's hit (`gather_hits`, `gather_shadow`): the
 // light it sends back but for its direct light where it has its own
 // (`rest`, packed), that direct light waiting on a shadow ray (`light`,
-// packed; `row` the shadow stream's row, GATHER_NONE: none), the luminance
-// of the cache's whole light at the hit (`cache_y`, what a re-trace
-// compares).
+// packed; `row` the shadow stream's row, GATHER_NONE: none; between the two
+// passes `light` holds the sides that light themselves, `GiHitLight::own`,
+// and `row` the light query's), the luminance of the cache's whole light at
+// the hit (`cache_y`, what a re-trace compares).
 struct GatherHitLight {
     rest: u32,
     light: u32,
@@ -649,20 +650,11 @@ fn block_reach(footprint: f32) -> f32 {
     return (1.41421356 * f32(side()) + 1.0) * footprint;
 }
 
-// Whether the cache's cell at a hit `t` along a ray of footprint
-// `footprint` there may stand for the hit's light: no wider than the ray is
-// long. A wider cell (the cache's eye angle sets a read's level where the
-// ray's footprint is finer) averages light over surfaces the hit does not
-// see from where it is: the lit wall above a contact, the far side of a
-// thin wall.
-fn trusted(p: vec3<f32>, footprint: f32, t: f32) -> bool {
-    return radiance_cache_size(radiance_cache_level(p, footprint)) <= t;
-}
-
 // The luminance of the cache's whole light at a hit (the front side's cell,
-// read without claiming it), what a re-trace compares; 0 where none.
+// read without claiming it, as a reader in the air: a light that changed
+// shows wherever the cell holds), what a re-trace compares; 0 where none.
 fn cache_luminance(point: vec3<f32>, side: vec3<f32>, surface: SceneSurface, footprint: f32, space: u32) -> f32 {
-    let c = radiance_cache_read(point, side, footprint, space, GI_CACHE_REACH);
+    let c = radiance_cache_read(point, side, footprint, space, GI_CACHE_REACH, RADIANCE_CACHE_FAR);
     if !c.found { return 0.0; }
     let s = scene_surface_unpack(surface);
     return luminance(s.albedo.rgb * (c.direct + c.indirect) / PI + s.emissive);
@@ -723,26 +715,18 @@ fn gather_hits(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invo
             let surface = surfaces[i];
             let footprint = scene_ray_footprint(ray, m.t);
             let space = scene_ray_space(ray);
-            if trusted(m.point, footprint, m.t) {
-                let lit = gi_hit_light(m.point - eye, ray.dir, surface, footprint, space, false, true);
-                let c = lit.reflected + lit.emitted;
-                light.rest = scene_pack_radiance(c);
-                light.cache_y = luminance(c);
-            } else {
-                // The cell's indirect part (a bounce on, its error second
-                // order), unclaimed; the hit's direct light its own. Where
-                // the cache has no cell the probes' whole irradiance stands
-                // in, and no light of its own is added to it.
-                let lit = gi_hit_light(m.point - eye, ray.dir, surface, footprint, space, true, false);
-                light.rest = scene_pack_radiance(lit.reflected + lit.emitted);
-                light.cache_y = cache_luminance(m.point, m.normal, surface, footprint, space);
-                if lit.stood {
-                    let s = scene_surface_unpack(surface);
-                    let seed = gi_hash(i ^ gather.info.y * 0x9e3779b9u);
-                    let u = texel_sample(i, gather.info.y, 1u);
-                    query = light_query_point(m.point, footprint, s.normal, any(surface_transmission(s) > vec3<f32>(0.0)), u, seed, space);
-                    want = true;
-                }
+            let lit = gi_hit_light(m.point - eye, ray.dir, surface, footprint, space, m.t, false, true, true);
+            light.rest = scene_pack_radiance(lit.reflected + lit.emitted);
+            light.cache_y = cache_luminance(m.point, m.normal, surface, footprint, space);
+            if lit.own != 0u {
+                // A side the cache has no light for: its own light sample,
+                // two-sided where its far side lights itself.
+                let s = scene_surface_unpack(surface);
+                let seed = gi_hash(i ^ gather.info.y * 0x9e3779b9u);
+                let u = texel_sample(i, gather.info.y, 1u);
+                query = light_query_point(m.point, footprint, s.normal, (lit.own & GI_SIDE_FAR) != 0u, u, seed, space);
+                light.light = lit.own;
+                want = true;
             }
         }
     }
@@ -787,7 +771,8 @@ fn gather_shadow(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_in
         if light.row != GATHER_NONE {
             let sample = light_samples[light.row];
             light.row = GATHER_NONE;
-            let direct = gi_hit_direct(surfaces[i], sample);
+            let direct = gi_hit_direct(surfaces[i], sample, light.light);
+            light.light = 0u;
             if direct.lit {
                 let ray = rays_in[i];
                 let t = hits[i].t;

@@ -158,7 +158,11 @@ fn gi_light(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
                 let n = s.normal;
                 let footprint = width + spread * hit.t;
                 let through = surface_transmission(s);
-                let lit = gi_hit_light(at, dir, surface, footprint, space, !probe, true);
+                // The reach (`radiance_cache_read`): a probe is in the air;
+                // a cache ray left its cell's surface, which is in its hit's
+                // way at the ray's length.
+                let reach = select(t, RADIANCE_CACHE_FAR, probe);
+                let lit = gi_hit_light(at, dir, surface, footprint, space, reach, !probe, false, true);
                 bounced = lit.reflected;
                 rest = lit.emitted;
                 // A probe takes the hit's whole light; a cache ray's cell
@@ -255,7 +259,7 @@ fn gi_shadow(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_ind
         if pending.row != GI_NO_ROW {
             let sample = light_samples[pending.row];
             pending.row = GI_NO_ROW;
-            let direct = gi_hit_direct(ray_surfaces[row], sample);
+            let direct = gi_hit_direct(ray_surfaces[row], sample, GI_SIDE_NEAR | GI_SIDE_FAR);
             if direct.lit {
                 let p = ray.origin + ray.dir * ray_hits[row].t;
                 first_ray = gi_shadow_ray(p + direct.side * gi_ray_offset(p), sample, scene_ray_footprint(ray, ray_hits[row].t), space);

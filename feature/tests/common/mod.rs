@@ -574,7 +574,7 @@ fn read_cache(@builtin(global_invocation_id) id: vec3<u32>) {
     if i >= info.x { return; }
     let q = queries[i];
     let space = bitcast<u32>(q.n.w);
-    let e = radiance_cache_read(q.p.xyz, q.n.xyz, q.p.w, space, RADIANCE_CACHE_LEVELS);
+    let e = radiance_cache_read(q.p.xyz, q.n.xyz, q.p.w, space, RADIANCE_CACHE_LEVELS, RADIANCE_CACHE_FAR);
     var history = vec2<f32>(0.0);
     let s = radiance_cache_find(radiance_cache_key(q.p.xyz, q.n.xyz, radiance_cache_level(q.p.xyz, q.p.w), space));
     if s != RADIANCE_CACHE_NONE {
@@ -584,7 +584,7 @@ fn read_cache(@builtin(global_invocation_id) id: vec3<u32>) {
     out[i * 3u] = vec4<f32>(e.direct, select(-1.0, f32(e.level), e.found));
     out[i * 3u + 1u] = vec4<f32>(e.indirect, 0.0);
     out[i * 3u + 2u] = vec4<f32>(history, 0.0, 0.0);
-    if info.y != 0u { radiance_cache_mark(q.p.xyz, q.n.xyz, q.p.w, space); }
+    if info.y != 0u { radiance_cache_mark(q.p.xyz, q.n.xyz, q.p.w, space, RADIANCE_CACHE_FAR); }
 }
 "#;
 

@@ -73,7 +73,8 @@ fn a_mesh_scene_s_probes_trace_its_meshes_on_frames_with_a_tlas() {
             );
     assert!(
         renderer.find_pass::<MeshRayPass>().is_some(),
-        "no mesh tracer in the graph"
+        "no mesh tracer in the graph: {:?}",
+        renderer.pipeline_status()
     );
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: None,
