@@ -15,8 +15,9 @@
 // `gi_light`: a hit's light from the radiance cache (`frame_radiance_cache`:
 // the irradiance arriving at the hit's cell), through it from its far side
 // and what it emits, or the sky on a miss, into `gi_pending`; every hit marks
-// its cell in use. A probe's hit takes the cache's whole irradiance: lighting
-// a surface for indirect purposes is the cache's alone. A cache ray's hit
+// its cell in use (the side its ray met; the far side is read, not
+// marked). A probe's hit takes the cache's whole irradiance: lighting a
+// surface for indirect purposes is the cache's alone. A cache ray's hit
 // takes its indirect part, and a query of the frame's light samples
 // (`LightQuery`) for its direct light, with one more query a cache ray for
 // its cell's own direct light, compacted into the light batch.
@@ -99,7 +100,8 @@ const GI_CACHE_REACH: u32 = 1u;
 
 // The irradiance / pi the cache holds at eye-relative hit `at` on the side of
 // unit `side` for a ray of footprint `footprint` in space `space` (its
-// indirect part alone for `indirect_only`), marking its cell, and 1 in w.
+// indirect part alone for `indirect_only`), marking its cell when `mark`,
+// and 1 in w.
 // Where it has no light for the hit within GI_CACHE_REACH, a stand-in: the
 // hit's own cell's light where its rays have not yet explored the way to
 // the hit (a few updates: the hits that lack light are the ones near what
@@ -108,10 +110,10 @@ const GI_CACHE_REACH: u32 = 1u;
 // occluder, its finer cell new this frame or the last), the probes' at the
 // hit toward `n` (their own previous state), never that cell's light from
 // the occluder's other side. w: 0.5 the cell's stand-in, 0 the probes'.
-fn hit_irradiance(at: vec3<f32>, side: vec3<f32>, n: vec3<f32>, footprint: f32, space: u32, indirect_only: bool) -> vec4<f32> {
+fn hit_irradiance(at: vec3<f32>, side: vec3<f32>, n: vec3<f32>, footprint: f32, space: u32, indirect_only: bool, mark: bool) -> vec4<f32> {
     let p = at + gi_trace.eye.xyz;
     let c = radiance_cache_read(p, side, footprint, space, GI_CACHE_REACH);
-    radiance_cache_mark(p, side, footprint, space);
+    if mark { radiance_cache_mark(p, side, footprint, space); }
     if c.found {
         return vec4<f32>((c.indirect + select(c.direct, vec3<f32>(0.0), indirect_only)) / PI, 1.0);
     }
@@ -206,7 +208,7 @@ fn gi_light(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
                 // The share of the light behind it that passes through, by
                 // colour (two-sided leaves).
                 let through = surface_transmission(s);
-                let front = hit_irradiance(at, side, n, footprint, space, !probe);
+                let front = hit_irradiance(at, side, n, footprint, space, !probe, true);
                 bounced = s.albedo.rgb * front.rgb;
                 // A probe's hit the cache could not light yet, where it
                 // matters (a surface that reflects or lets light through):
@@ -216,7 +218,12 @@ fn gi_light(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
                 // ... and whether a stand-in it took is a cell's.
                 var stood = front.w > 0.0 || dark;
                 if any(through > vec3<f32>(0.0)) {
-                    let back = hit_irradiance(at, -side, -n, footprint, space, !probe);
+                    // The far side's cell is read, never marked: the hit is
+                    // on the side its ray met, and behind it may be the
+                    // inside of what lets light through (a voxel of leaves:
+                    // a cell seated there would start its rays in it). The
+                    // far side's cells are the ones rays from that side make.
+                    let back = hit_irradiance(at, -side, -n, footprint, space, !probe, false);
                     bounced += through * back.rgb;
                     answered = answered && back.w == 1.0;
                     stood = stood && back.w > 0.0;

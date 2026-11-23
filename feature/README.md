@@ -84,7 +84,9 @@ phase, and holds the whole update:
    lane a cache ray; the cache's light batch's generator). For a ray that met
    an outside, its hit's light from the radiance cache at the hit (on the
    side the ray met, at the ray's footprint there, in its space), marking
-   the hit's cell in use:
+   the hit's cell in use (the side the ray met only: a far side lit through
+   is read, never marked, since behind a voxel of leaves it is the voxel's
+   inside, where a cell seated there would start every ray in a solid):
    - a probe's ray: `base * cache irradiance / pi + share * the far side's
      cache irradiance / pi + emission`, the cache's direct and indirect parts
      both. Where the cache has no light for the hit within its reach, the
@@ -225,8 +227,12 @@ reflections). GI publishes it (`cache.rs`, `gi_cache.wgsl`):
   buckets of 16 slots; a slot is its key's checksum and the frame it was
   last marked. A cell first marked takes the marking hit's point and normal
   and a place in the new cells' queue (after the slots: a quarter of them
-  a frame); the point stays for the cell's life (its clear distances are
-  that point's). A mark also marks the cell three levels coarser.
+  a frame); the point stays while the cell's rays find it on a free
+  surface (its clear distances are that point's). A cell all of whose rays
+  of an update started in a solid (the surface it was taken on is gone:
+  terrain streamed in finer, an edit) is unseated: no value, its life
+  cleared, not lit until the next mark seats it at that mark's hit. A mark
+  also marks the cell three levels coarser.
 - **Where a cell's light holds** (`radiance_cache_holds`): each cell keeps
   how far from its point along its surface its rays found nothing in the
   way, in 8 directions (from the rays that went low, below 45 degrees over

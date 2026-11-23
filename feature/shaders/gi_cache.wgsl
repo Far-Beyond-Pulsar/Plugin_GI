@@ -185,7 +185,9 @@ fn life_settled(life: CacheLife) -> bool {
 // converging ones crowd out still takes an update); a cell still
 // converging, by the share of its history it holds (least first); 0: none.
 fn need_bin(s: u32, life: CacheLife) -> u32 {
-    if life.lit == 0u { return NEED_NEW; }
+    // A cell never lit, unless it waits for a mark to seat it
+    // (`RADIANCE_CACHE_UNSEATED`: its rays have nowhere to start from).
+    if life.lit == 0u { return select(NEED_NEW, 0u, radiance_cache_entries[s].point == RADIANCE_CACHE_UNSEATED); }
     if (life.counts >> 24u) != 0u { return NEED_RESTART; }
     let turn = (radiance_cache_frame.origin_z.w + radiance_cache_mix(s)) % CACHE_REFRESH;
     if turn == 0u { return NEED_REFRESH; }
@@ -515,7 +517,16 @@ fn cache_fold(@builtin(global_invocation_id) id: vec3<u32>) {
             direct += scene_unpack_radiance(cell.light) * scene_occlusion_through(shadow_hits[cell.row]);
         }
     }
-    if rays == 0u { return; }
+    // Every ray started in a solid: the cell's point is no longer on a free
+    // surface (the surface it was taken on was replaced: terrain streamed in
+    // finer, an edit, a finer level of detail). The cell starts again,
+    // unseated: no value, its life cleared, its next mark its point.
+    if rays == 0u {
+        radiance_cache_entries[slot].history = 0u;
+        radiance_cache_entries[slot].point = RADIANCE_CACHE_UNSEATED;
+        cache_life[slot] = CacheLife(0u, 0u, array<f32, 3>(0.0, 0.0, 0.0), array<f32, 3>(0.0, 0.0, 0.0), array<f32, 3>(0.0, 0.0, 0.0), 0u);
+        return;
+    }
     // Cosine-distributed rays: irradiance is pi times their mean radiance;
     // the light samples' parts are irradiance already.
     indirect *= BSDF_PI / f32(rays);
