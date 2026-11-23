@@ -3,6 +3,7 @@
 //!use frame_ray_stream
 //!use frame_ray_surface
 //!use frame_surface
+//!use frame_bsdf
 //!use frame_light_samples
 //!use frame_radiance_cache
 //!use gi_common

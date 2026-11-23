@@ -407,6 +407,77 @@ fn a_thin_wall_s_two_sides_stay_apart() {
     assert!(dark.max_element() < 1e-4, "dark {dark}, lit {lit}");
 }
 
+/// The form factor from a point to a rectangle parallel to its surface, the
+/// point under one of its corners: sides `x` and `y` over the height `h`.
+fn corner_form_factor(x: f64, y: f64, h: f64) -> f64 {
+    let (x, y) = (x / h, y / h);
+    let (a, b) = ((1.0 + x * x).sqrt(), (1.0 + y * y).sqrt());
+    (x / a * (y / a).atan() + y / b * (x / b).atan()) / (2.0 * PI)
+}
+
+/// The sun (2) straight down on a thin two-sided card 2 m square a metre
+/// over a black floor, no sky: the floor's cell under the card's middle
+/// holds what comes through the card and nothing else. Its direct part is
+/// the sun through the card's share (`base * transmission`: the shadow ray
+/// passes the card by it); its indirect part is the card's underside, which
+/// sends that share of the sun on its top on by the frame BSDF's thin lobe
+/// (radiance `share * 2 / pi`), over the card as the floor's middle sees it
+/// (four corners' form factors). Under an opaque card, nothing at all.
+/// Bound: 10%, the closed box's (a cell's estimate over its history).
+#[test]
+fn a_thin_card_lets_the_sun_through_to_the_floor_under_it() {
+    for transmission in [0.5f32, 0.0] {
+        let setup = Setup {
+            sun: Some(2.0),
+            ..Default::default()
+        };
+        let c = setup.world_eye();
+        let floor = c.y - 1.5;
+        let middle = DVec3::new(c.x + 0.4, floor, c.z - 0.3);
+        let card = Shape::card(
+            middle + DVec3::new(-1.0, 1.0, -1.0),
+            middle + DVec3::new(1.0, 1.0, 1.0),
+            HALF,
+            transmission,
+        );
+        let Some(mut h) = harness(setup, vec![card, Shape::ground(floor, 0.0)]) else {
+            return;
+        };
+        h.read_cache(
+            vec![CacheQuery {
+                world: middle,
+                normal: Vec3::Y,
+                space: space_of_slot(0),
+            }],
+            true,
+        );
+        settle(&mut h, "the floor under the card settles");
+        let (direct, indirect) = mean_reads(&mut h, 64)[0];
+        let share = f64::from(HALF * transmission);
+        let want_direct = 2.0 * share;
+        let want_indirect = 4.0 * corner_form_factor(1.0, 1.0, 1.0) * 2.0 * share;
+        println!(
+            "transmission {transmission}: direct {} (want {want_direct:.4}), indirect {} (want {want_indirect:.4})",
+            direct.x, indirect.x
+        );
+        if transmission == 0.0 {
+            assert!(
+                direct.max_element() < 1e-4 && indirect.max_element() < 1e-4,
+                "under an opaque card: direct {direct}, indirect {indirect}"
+            );
+        } else {
+            assert!(
+                (f64::from(direct.x) / want_direct - 1.0).abs() < 0.10,
+                "direct {direct} against {want_direct}"
+            );
+            assert!(
+                (f64::from(indirect.x) / want_indirect - 1.0).abs() < 0.10,
+                "indirect {indirect} against {want_indirect}"
+            );
+        }
+    }
+}
+
 /// The lit box split by a wall 5 cm thick, the light on one side: the far
 /// side gets no light at all. Read on the dark side next to the wall with
 /// the eye as far from the reads as makes their surfaces' cells 1/8 m to

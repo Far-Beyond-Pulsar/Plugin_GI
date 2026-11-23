@@ -46,12 +46,13 @@ use crate::{
 };
 
 /// The snippets `gi_light.wgsl` is built with.
-pub(crate) const SNIPPETS: [helio_core::shader::ShaderSnippet; 11] = [
+pub(crate) const SNIPPETS: [helio_core::shader::ShaderSnippet; 12] = [
     SKY_SNIPPET,
     SKY_RADIANCE_SNIPPET,
     stream::SNIPPET,
     stream::SURFACE_SNIPPET,
     helio_frame_api::gbuffer::SURFACE_SNIPPET,
+    helio_frame_api::gbuffer::BSDF_SNIPPET,
     light_samples::SNIPPET,
     radiance_cache::SNIPPET,
     GI_COMMON_SNIPPET,

@@ -1,6 +1,6 @@
 // How GI lights a ray's hit and a ray's miss (`//!use gi_hit`, with
 // `frame_sky`, `sky_radiance`, `frame_ray_stream`, `frame_ray_surface`,
-// `frame_surface`, `frame_light_samples`, `frame_radiance_cache`,
+// `frame_surface`, `frame_bsdf`, `frame_light_samples`, `frame_radiance_cache`,
 // `gi_common`, `gi_sample` and `gi_rays`): the one place GI's readers of a
 // stream (the probes' and the cache's rays in `gi_light`, the pixels' rays
 // in `gi_gather`) turn a hit into the light it sends back along its ray. A
@@ -98,17 +98,25 @@ fn gi_hit_light(at: vec3<f32>, dir: vec3<f32>, surface: SceneSurface, space: u32
         if own_light && !front.found { lit.own |= GI_SIDE_NEAR; }
     }
     if any(through > vec3<f32>(0.0)) {
-        // A far side the cache has no light for passes on nothing of the
-        // probes' (at a point on a thin surface they hold the near side's
-        // light too, both sides' probes seeing the point: the surface's own
-        // light would come back through it).
+        // What passes through from the far side: its indirect light from
+        // the cache (nothing where it has none: at a point on a thin surface
+        // the probes hold the near side's light too, both sides' probes
+        // seeing the point, so the surface's own light would come back
+        // through it) and, for a reader that
+        // lights a side itself, its direct light from a light sample of the
+        // reader's own through the frame BSDF's thin lobe, the shadow ray
+        // from the lit side (`gi_hit_direct`). A far side's cell exists only
+        // where rays from that side met it (never inside a voxel of
+        // leaves, under a canopy's top), so the lights' light through a
+        // two-sided surface is not left to it.
         let back = gi_hit_cell(at, -side, -s.normal, space, reach, false);
+        let back_direct = !indirect_only && !own_light;
         if back.found {
-            lit.reflected += through * (back.indirect + select(vec3<f32>(0.0), back.direct, !indirect_only));
+            lit.reflected += through * (back.indirect + select(vec3<f32>(0.0), back.direct, back_direct));
         }
         lit.answered = lit.answered && back.found;
         lit.waiting = lit.waiting || back.waiting;
-        if own_light && !back.found { lit.own |= GI_SIDE_FAR; }
+        if own_light { lit.own |= GI_SIDE_FAR; }
     }
     return lit;
 }
@@ -138,7 +146,8 @@ fn gi_hit_direct(surface: SceneSurface, sample: LightSample, sides: u32) -> GiHi
         d.light = s.albedo.rgb * radiance * cosine / PI;
         d.side = face;
     } else if any(through > vec3<f32>(0.0)) && cosine < 0.0 && (sides & GI_SIDE_FAR) != 0u {
-        d.light = through * radiance * -cosine / PI;
+        // The frame BSDF's lobe through a thin two-sided surface.
+        d.light = bsdf_eval(s, s.normal, towards) * radiance;
         d.side = -face;
     }
     d.lit = any(d.light > vec3<f32>(0.0));

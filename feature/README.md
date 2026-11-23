@@ -81,34 +81,43 @@ phase, and holds the whole update:
    volume on the terrain, a binned material pass a program on meshes) is
    paid once; not in runs, since a probe's rays share no origin.
 4. **`GiLightPass`** (`gi_light`; a workgroup a probe, a lane a ray, then a
-   lane a cache ray; the cache's light batch's generator). For a ray that met
-   an outside, its hit's light from the radiance cache at the hit (on the
-   side the ray met, at the ray's footprint there, in its space), marking
-   the hit's cell in use (the side the ray met only: a far side lit through
-   is read, never marked, since behind a voxel of leaves it is the voxel's
-   inside, where a cell seated there would start every ray in a solid):
-   - a probe's ray: `base * cache irradiance / pi + share * the far side's
-     cache irradiance / pi + emission`, the cache's direct and indirect parts
-     both. Where the cache has no light for the hit within its reach, the
-     ray is marked unlit and takes a stand-in: the hit's cell's light where
-     its rays have not yet explored the way to the hit, the probes' own
-     irradiance where they found something in the way or the cell is new;
+   lane a cache ray; GI's light batch's generator). For a ray that met an
+   outside, its hit's light as `gi_hit.wgsl` lights a hit (the one copy, the
+   gather's too): the radiance cache at the hit (on the side the ray met, in
+   its space, any reach: a probe is in the air, and a cache ray's hit is its
+   cell's bounced part), marking the hit's cell in use (the side the ray met
+   only: a far side lit through is read, never marked, since behind a voxel
+   of leaves it is the voxel's inside, where a cell seated there would start
+   every ray in a solid):
+   - a probe's ray: `base * cache irradiance / pi + emission`, the cache's
+     direct and indirect parts both. A side the cache has no light for (its
+     cell new, its rays not yet past the way to the hit, an occluder between
+     with no finer cell that holds) is lit on the spot: the probes'
+     irradiance there for its indirect light (DDGI's recursion) and a light
+     query of its own for its direct light. A two-sided surface's far side:
+     the cache's indirect part where it has one (nothing of the probes',
+     which at a point on a thin surface hold the near side's light too), and
+     its direct light always from the probe's own light sample through the
+     frame BSDF's thin lobe, its shadow ray from the lit side (a far side's
+     cell exists only where rays from that side met it);
    - a cache ray: its hit's emission into `gi_pending`, and apart
      (`gi_cell_pending`) what it reflects of the cache's indirect light there
-     (the bounced part's update), and a
-     light query at the hit (`LightQuery`: its place, the ray's footprint
-     there, its normal, lit from both sides when it lets light through, its
-     space) and one at its cell's point, packed into the cache's light batch
-     (`radiance_cache`, `light_batch()`) from row 0, a workgroup's together.
+     (the bounced part's update; none from a hit the cache has no light for),
+     and a light query at the hit (`LightQuery`: its place, the ray's
+     footprint there, its normal, lit from both sides when it lets light
+     through, its space) and one at its cell's point.
 
-   A miss takes the sky (`sky_radiance_at`, one call for both kinds): the
+   The queries are packed into GI's light batch (`radiance_cache`,
+   `light_batch()`: a row a probe ray, two a cache ray) from row 0, a
+   workgroup's together.
+
+   A miss takes the sky (`gi_sky_radiance`, one call for every reader): the
    atmosphere's radiance table at the ray's origin (`sky_radiance_eval`:
    the sky's radiance by direction, which from the eye is the sky the sky
    pass draws); without an atmosphere, the flat ambient above the horizon
    and 0.15 of it below. What it has
    into `gi_pending` (RGB9E5, 16 bytes a ray), the cell's query's row into
-   `gi_cell_pending`. GI lights no probe hit itself: lighting a surface for
-   indirect purposes is the cache's alone.
+   `gi_cell_pending`.
 5. **The light samplers** (`light_samples::sample`): every kind of light
    that registered a sampler offers one of its lights at each query (the
    lights' sampler: its point, spot and directional lights, the sun through
@@ -116,30 +125,34 @@ phase, and holds the whole update:
    the row keeps one, chosen in proportion to what each brings. GI reads no
    light kind's rows: the sun is one more sample. The sampler's world-space
    light grid is the sampler's own; nothing in the cache depends on it.
-6. **`GiShadowPass`** (`gi_shadow`, a lane a cache ray): its hit's sample
-   off the hit's surface (`base * radiance * cos / pi` on the side the light
-   is on; a surface with a transmission share whose far side faces the
-   light lets that share through) and its cell's as irradiance at the cell
-   (`radiance * cos`), each waiting on a shadow ray from its side. Shadow
+6. **`GiShadowPass`** (`gi_shadow`, a workgroup a probe, then a lane a cache
+   ray): a hit's sample off its surface on the sides that take it
+   (`gi_hit_direct`: `base * radiance * cos / pi` on the side its ray met;
+   from behind, the frame BSDF's thin lobe, `bsdf_eval`) and a cell's as
+   irradiance at the cell (`radiance * cos`), each waiting on a shadow ray
+   from its side. Shadow
    rays start off the surface by `0.002 + 4e-6 * |p|` (a few ulps of f32 at
    the point), a hit's as wide as the ray's footprint there and a cell's as
    wide as the cell, with no spread (cut-outs on the way are tested at it),
    and end short of a local light (a directional light's reach a planet
    across). They are packed into the shadow stream (`radiance_cache_shadow`,
-   `RayClass::Occlusion`, two a cache ray at most) from row 0, a
+   `RayClass::Occlusion`, two a cache ray and one a probe ray at most) from
+   row 0, a
    workgroup's together; a one-invocation dispatch writes the stream's
    dispatch from the count.
 7. **The tracers** of the shadow stream: what gets through each, per
    channel.
 8. **`GiIntegratePass`** (`gi_integrate.wgsl`, a workgroup a probe, a lane
-   a ray): a ray's radiance is its `rest`; an inside gives nothing. A probe
-   more than 1/32 of whose hits the cache could not light yet (so its
-   irradiance is off by at most that share; a scene loading, the eye
-   somewhere new) holds this update (with fewer, those hits are left out
-   of the projection), so it is not taught a world lit by its
-   own previous state alone, and goes on the held list: read back without
-   waiting, it puts those probes first in the schedule a few frames later,
-   once the cache (new cells first) has lit their cells. Once a probe holds light, a
+   a ray; after both streams' tracers, holding on a frame either was
+   short): a ray's radiance is its `rest` plus, for a hit lit on the spot,
+   its light sample's light through its shadow ray; an inside gives
+   nothing. Every ray is projected over the whole sphere (no ray left out,
+   no rescale). The one hold is readiness: a probe never updated more than
+   1/32 of whose hits met cells still new holds and goes on the held list:
+   read back without waiting, it puts those probes first in the schedule a
+   few frames later, once the cache (new cells first) has lit their cells,
+   so its first update is not taught a world lit by the probes' empty
+   state. Once a probe holds light, a
    ray's radiance is capped at 16 times the probe's mean irradiance / pi
    plus 2: a ray meeting a surface centimetres from a point light (its
    fitting) would otherwise dominate its probe for many updates
@@ -221,27 +234,28 @@ needs a lit hit (GI's probes and its own rays here; a pixel's gather,
 reflections). GI publishes it (`cache.rs`, `gi_cache.wgsl`):
 
 - **Keys** (the contract's): the world cell of the hit (64-bit counts an
-  axis), its level (cells 2^-6 to 2^10 m, the coarser of the ray's
-  footprint and the eye angle at its distance), the dominant side of the
+  axis), its level (cells 2^-6 to 2^10 m: one a surface point, the eye
+  angle's at its distance, whoever reads it), the dominant side of the
   hit's face turned toward the ray, the ray's coordinate space. Hashed into
-  buckets of 16 slots; a slot is its key's checksum and the frame it was
-  last marked. A cell first marked takes the marking hit's point and normal
+  buckets of 16 slots (a key in its bucket or, where that was full, the
+  next); a slot is its key's checksum and the frame it was last marked. A cell first marked takes the marking hit's point and normal
   and a place in the new cells' queue (after the slots: a quarter of them
   a frame); the point stays while the cell's rays find it on a free
   surface (its clear distances are that point's). A cell all of whose rays
   of an update started in a solid (the surface it was taken on is gone:
   terrain streamed in finer, an edit) is unseated: no value, its life
-  cleared, not lit until the next mark seats it at that mark's hit. A mark
-  also marks the cell three levels coarser.
+  cleared, not lit until the next mark seats it at that mark's hit.
 - **Where a cell's light holds** (`radiance_cache_holds`): each cell keeps
   how far from its point along its surface its rays found nothing in the
   way, in 8 directions (from the rays that went low, below 45 degrees over
-  the surface: a wall standing there bounds a way, a ceiling far above does
-  not; a way no ray explored yet holds a 32nd of the cell). A read whose
-  point is further than that reads the finer cell whose light holds there
-  (no finer than the eye angle's cells), and a mark claims those finer
-  cells: a cell wider than a thin wall or slab beside it lights its own
-  side only.
+  the surface: a wall standing there bounds a way, at the line where the
+  plane of the face met crosses the cell's surface; a ceiling far above
+  does not; a way no ray explored yet holds a 32nd of the cell). A read
+  whose point is further than that, or than its reader's reach (a pixel's
+  ray its length: the surface it left is in the hit's way there), reads the
+  finer cell whose light holds there (at most 3 levels finer), and a mark
+  claims those finer cells: a cell wider than a thin wall or slab beside it
+  lights its own side only.
 - **The cells in use are a list** on the GPU (two halves, one current):
   what the last frame kept, then the queue the marks filled. Every pass
   walks it with indirect dispatches, so a frame's work follows the cells in
@@ -249,7 +263,8 @@ reflections). GI publishes it (`cache.rs`, `gi_cache.wgsl`):
 - **Each frame** (`RadianceCache`: `cache_begin`, `cache_scan`,
   `cache_plan`, `cache_select`, `cache_end`, `cache_rays`): the cells' ages
   and needs into histograms; evicted, the cells no reader marked for 128
-  frames and, past half the slots, the least recently used; lit by need,
+  frames and, past half the slots, the least recently used but never one
+  marked within 64 frames (past the probes' longest period); lit by need,
   `rays / 4` cells at most: never lit, a part restarting, the refresh (each
   cell once in 21 frames, the finest probes' period), then those still
   converging, the least of their history first. A settled static scene
@@ -259,9 +274,9 @@ reflections). GI publishes it (`cache.rs`, `gi_cache.wgsl`):
 - **Their light** (`GiLightPass`, `GiShadowPass`): a hit's emission (the
   sky's radiance table on a miss) and light sample and shadow ray; apart,
   what the hit reflects of the cache's own light (none from a hit the cache
-  has no light for yet: a stand-in would carry light into the cache across
-  what its cells keep apart); the cell's own light sample and shadow ray a
-  ray.
+  has no light for yet: the probes' irradiance there would carry light into
+  the cache across what its cells keep apart); the cell's own light sample
+  and shadow ray a ray.
 - **The fold** (`RadianceCacheFold`, a lane a lit cell): three parts. The
   direct (the cell's light samples) and indirect (what the hits send as
   the rays meet them) are stationary: the plain mean of their updates
@@ -303,15 +318,15 @@ resolve the probes). Frame contracts only (`gather.rs`, `gi_gather.wgsl`):
    in 4 also re-traces its previous reservoir's sample.
 2. The tracers answer the stream (`stream::trace`): terrain and meshes alike,
    with or without ray queries (whichever tracers the device runs).
-3. **`GiGatherHitsPass`** (`gather_hits`): each hit's light. Where the
-   cache's cell at the hit is no wider than the ray is long, the cell's
-   light (`gi_hit`, as the probes' hits take it, the cell claimed); a cell
-   wider than that averages light the hit does not see (the floor past a
-   contact, the lit side of a thin wall), so there the cell's indirect part
-   alone, read without claiming it, and a light query for the hit's own
-   direct light into the light batch `gi_pixels` (the probes stand in, with
-   no light of their own added, where the cache has no cell). The frame's
-   light samplers answer (`light_samples::sample`).
+3. **`GiGatherHitsPass`** (`gather_hits`): each hit's light as the probes'
+   hits take it (`gi_hit`, the cell claimed), with the ray's length as its
+   reach: a cell whose point lies farther from the hit than that averages
+   light the hit does not see (the floor past a contact, the lit side of a
+   thin wall), and the cache answers from a finer cell or not at all. A
+   side the cache has no light for is lit on the spot (the probes'
+   irradiance and a light query of its own into the light batch
+   `gi_pixels`), as is a two-sided hit's far side's direct light. The
+   frame's light samplers answer (`light_samples::sample`).
 4. **`GiGatherShadowPass`** (`gather_shadow`): each sample's light at its
    hit (`gi_hit_direct`), waiting on a shadow ray from the light's side, the
    rays compacted into the stream `gi_pixels_shadow`. The tracers answer.
@@ -350,15 +365,17 @@ of each setting).
 ## Costs
 
 2720 probe updates a frame (174k probe rays) and the cache's light by need
-(32,768 rays a frame at most, 65,536 light queries and shadow rays at most).
+(32,768 rays a frame at most; light queries and shadow rays at most two a
+cache ray and one a probe ray, 239,616).
 GI's own passes are the generation, the cache's walks and rays, the hits'
-light (cache reads and marks, the cache rays' light queries), the cache
-rays' shadow rays, the integration and the fold; the samplers' cost is
+light (cache reads and marks, the light queries), the shadow rays, the
+integration and the fold; the samplers' cost is
 theirs, the tracers' theirs. What each scales with: the probes' work with
 the probes updated; the cache's walks with the cells in use; its rays,
-queries, shadow rays and fold with the cells lit (the cap a setting); a
-read with the levels it walks (one bucket of 16 slots a level, usually one
-level; more next to an occluder that splits a coarse cell). CPU work a
+queries, shadow rays and fold with the cells lit (the cap a setting), the
+probes' own light queries with their hits the cache has no light for; a
+read one level (one bucket of 16 slots, the next where that is full), more
+next to an occluder that splits a cell (at most 3). CPU work a
 frame: the probes that came in and the update list, four small uploads,
 the held probes' list read back without waiting; bind groups are kept while
 their inputs stay. Memory: 6 x 24^3 probes x 288 bytes (24 MB); the

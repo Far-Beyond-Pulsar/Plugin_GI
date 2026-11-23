@@ -172,6 +172,20 @@ impl Shape {
         }
     }
 
+    /// A two-sided horizontal card at height `lo.y` over `lo.xz` to `hi.xz`,
+    /// letting `transmission` of the light through (a finite [`Self::sheet`]).
+    pub fn card(lo: DVec3, hi: DVec3, base: f32, transmission: f32) -> Self {
+        Self {
+            kind: SHEET,
+            lo,
+            hi: DVec3::new(hi.x, lo.y, hi.z),
+            transmission,
+            base: Vec3::splat(base),
+            emissive: Vec3::ZERO,
+            space: 0,
+        }
+    }
+
     /// A closed room from `lo` to `hi` (its walls face in).
     pub fn room(lo: DVec3, hi: DVec3, base: f32) -> Self {
         Self {
