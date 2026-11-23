@@ -172,10 +172,13 @@ type PassTimes = (
 /// over the frames from 60 to the capture (the renderer's timing snapshot,
 /// [`Self::timings`]): frames run as the host runs them, pipelined; and the
 /// frame statistics last read back then (rays per signal, the radiance
-/// cache's cells).
+/// cache's cells). `HELIO_CAPTURE_COUNT=<n>` saves `n` consecutive frames
+/// from it instead (`<png>` with `_000`, `_001`, ... before its extension),
+/// for means and per-frame noise.
 pub struct SurfaceCapture {
     path: Option<String>,
     at: u32,
+    count: u32,
     frame: u32,
     timings: Option<PassTimes>,
 }
@@ -189,6 +192,11 @@ impl SurfaceCapture {
         Self {
             path: std::env::var("HELIO_CAPTURE").ok(),
             at,
+            count: std::env::var("HELIO_CAPTURE_COUNT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1)
+                .max(1),
             frame: 0,
             timings: std::env::var_os("HELIO_CAPTURE_TIMINGS").map(|_| (Vec::new(), None, None)),
         }
@@ -292,9 +300,18 @@ impl SurfaceCapture {
         texture: &wgpu::Texture,
     ) -> bool {
         self.frame += 1;
-        let Some(path) = self.path.as_deref().filter(|_| self.frame == self.at) else {
+        let index = self.frame.wrapping_sub(self.at);
+        let Some(base) = self.path.as_deref().filter(|_| self.frame >= self.at && index < self.count)
+        else {
             return false;
         };
+        let path = if self.count == 1 {
+            base.to_string()
+        } else {
+            let (stem, ext) = base.rsplit_once('.').unwrap_or((base, "png"));
+            format!("{stem}_{index:03}.{ext}")
+        };
+        let path = path.as_str();
         let (width, height) = (texture.width(), texture.height());
         let row = (width * 4).div_ceil(256) * 256;
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
@@ -345,6 +362,9 @@ impl SurfaceCapture {
         }
         image::save_buffer(path, &pixels, width, height, image::ColorType::Rgba8).unwrap();
         println!("[capture] frame {} -> {path}", self.frame);
+        if index + 1 < self.count {
+            return false;
+        }
         self.print_timings();
         true
     }
