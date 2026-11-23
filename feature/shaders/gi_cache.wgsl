@@ -484,6 +484,7 @@ fn cache_fold(@builtin(global_invocation_id) id: vec3<u32>) {
     let p0 = radiance_cache_entry_point(e);
     let behind = 4.0 * (gi_ray_offset(p0) + radiance_cache_size(e.key.tag & 31u) * 2.65e-5);
     var rays = 0u;
+    var bounced_rays = 0u;
     for (var k = 0u; k < CACHE_RAYS; k++) {
         let r = i * CACHE_RAYS + k;
         let pending = gi_pending[frame_gi.updated * GI_RAYS + r];
@@ -506,7 +507,10 @@ fn cache_fold(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         indirect += l;
         let cell = cell_pending[r];
-        bounced += scene_unpack_radiance(cell.bounced);
+        if cell.unlit == 0u {
+            bounced += scene_unpack_radiance(cell.bounced);
+            bounced_rays += 1u;
+        }
         if cell.row != GI_NO_ROW {
             direct += scene_unpack_radiance(cell.light) * scene_occlusion_through(shadow_hits[cell.row]);
         }
@@ -515,7 +519,7 @@ fn cache_fold(@builtin(global_invocation_id) id: vec3<u32>) {
     // Cosine-distributed rays: irradiance is pi times their mean radiance;
     // the light samples' parts are irradiance already.
     indirect *= BSDF_PI / f32(rays);
-    bounced *= BSDF_PI / f32(rays);
+    bounced *= BSDF_PI / f32(max(bounced_rays, 1u));
     direct /= f32(rays);
     let fresh = life.lit == 0u;
     let counts = select(life.counts, 0u, fresh);
@@ -530,7 +534,7 @@ fn cache_fold(@builtin(global_invocation_id) id: vec3<u32>) {
     // changed) or with its own change test (those cells still converging:
     // a part whose level moves is not settled).
     var bp = Part(vec3<f32>(e.bounced[0], e.bounced[1], e.bounced[2]), select((counts >> 16u) & 0xffu, 0u, restart), life_test(life.bounced), ((counts >> 26u) & 1u) != 0u);
-    bp = fold(bp, bounced, CACHE_BOUNCED);
+    if bounced_rays > 0u { bp = fold(bp, bounced, CACHE_BOUNCED); }
     let nb = bp.n;
     let b = bp.v;
     // The clear distances: the nearest a ray of this update met along each

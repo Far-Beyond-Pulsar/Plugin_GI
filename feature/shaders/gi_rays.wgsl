@@ -64,12 +64,13 @@ struct GiPending {
 // light the ray's hit reflects of the cache's own (`bounced`: the hit's
 // cell's indirect light, and what passes through it from its far side),
 // which the cell folds apart from what the hit sends as it meets it
-// (`GiPending::rest` and `light`).
+// (`GiPending::rest` and `light`); `unlit` 1 where the cache had no light
+// for that hit but the probes' (the bounced part leaves the ray out).
 struct CachePending {
     light: u32,
     row: u32,
     bounced: u32,
-    pad: u32,
+    unlit: u32,
 }
 
 // How far a ray leaving frame point `p` starts off its surface: a few ulps

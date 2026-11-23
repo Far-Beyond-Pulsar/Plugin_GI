@@ -100,14 +100,14 @@ const GI_CACHE_REACH: u32 = 1u;
 // The irradiance / pi the cache holds at eye-relative hit `at` on the side of
 // unit `side` for a ray of footprint `footprint` in space `space` (its
 // indirect part alone for `indirect_only`), marking its cell, and 1 in w.
-// Where it has no light for the hit within GI_CACHE_REACH, the best
-// stand-in: the hit's own cell's light though its rays have not shown
-// it holds at the hit (a finer cell new this frame or the last, a way its
-// rays have not explored yet: a stand-in for a frame or a few, as the hits
-// that lack light are the ones near what splits a cell, darker than most,
-// which leaving out would brighten what they light); without one, the
-// probes' at the hit toward `n` (their own previous state). w: 0.5 the
-// cell's stand-in, 0 the probes'.
+// Where it has no light for the hit within GI_CACHE_REACH, a stand-in: the
+// hit's own cell's light where its rays have not yet explored the way to
+// the hit (a few updates: the hits that lack light are the ones near what
+// splits a cell, darker than most, which leaving out would brighten what
+// they light); where they found something in the way (the hit is past an
+// occluder, its finer cell new this frame or the last), the probes' at the
+// hit toward `n` (their own previous state), never that cell's light from
+// the occluder's other side. w: 0.5 the cell's stand-in, 0 the probes'.
 fn hit_irradiance(at: vec3<f32>, side: vec3<f32>, n: vec3<f32>, footprint: f32, space: u32, indirect_only: bool) -> vec4<f32> {
     let p = at + gi_trace.eye.xyz;
     let c = radiance_cache_read(p, side, footprint, space, GI_CACHE_REACH);
@@ -117,7 +117,8 @@ fn hit_irradiance(at: vec3<f32>, side: vec3<f32>, n: vec3<f32>, footprint: f32, 
     }
     if radiance_cache_present() {
         let s = radiance_cache_find(radiance_cache_key(p, side, radiance_cache_level(p, footprint), space));
-        if s != RADIANCE_CACHE_NONE && radiance_cache_has_value(radiance_cache_entries[s]) {
+        if s != RADIANCE_CACHE_NONE && radiance_cache_has_value(radiance_cache_entries[s])
+            && radiance_cache_light_at(radiance_cache_entries[s], p) == RADIANCE_CACHE_UNKNOWN {
             let e = radiance_cache_entries[s];
             let indirect = vec3<f32>(e.indirect[0] + e.bounced[0], e.indirect[1] + e.bounced[1], e.indirect[2] + e.bounced[2]);
             let direct = vec3<f32>(e.direct[0], e.direct[1], e.direct[2]);
@@ -225,6 +226,12 @@ fn gi_light(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
                 // folds what the hit reflects of the cache apart.
                 if probe { rest += bounced; }
                 if probe && !answered { pending.light = select(GI_UNLIT, GI_STOOD_IN, stood); }
+                // A cache ray's hit the cache has no light for: no bounced
+                // light from it (a stand-in, a cell's from the other side of
+                // what its rays have not yet explored or the probes', would
+                // carry light into the cache across what its cells keep
+                // apart, and the cache's light feeds itself).
+                if !probe && !answered { cell.unlit = 1u; }
                 if !probe {
                     // Its direct light: one light sample at the hit, as wide
                     // as the ray's footprint there, lit from both sides when
