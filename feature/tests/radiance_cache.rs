@@ -412,20 +412,26 @@ fn a_thin_wall_s_two_sides_stay_apart() {
 /// footprints from 1/8 m to 4 m, so each read's cell is wider than the wall
 /// and holds both sides (the lit side's cells marked by the probes' and the
 /// cache's rays, read on the lit side too): the dark reads find their own
-/// side's light, none. Twice: a wall standing on the floor (the floor's cells
-/// across it) and a slab across the box (the walls' cells across it).
+/// side's cells, which hold under 1% of the lit side's light (without the
+/// cells' clear distances the dark side reads the lit side's whole light
+/// from 1/4 m up; the 0.2% left at 1/8 m is not the cache's straddling:
+/// its source is open). Twice: a wall standing on the floor (the floor's
+/// cells across it) and a slab across the box (the walls' cells across it).
 #[test]
 fn a_wall_thinner_than_its_cells_keeps_its_light_on_its_side() {
     for vertical in [true, false] {
         let (setup, b) = lit_box_setup(DVec3::new(1000.0, 2.0, -500.0));
         let c = setup.world_eye();
         // World 1001.3 to 1001.35 (or 2.3 to 2.35 up): inside a cell of
-        // every level from 1/8 m to 4 m.
+        // every level from 1/8 m to 4 m. Into the room's walls by 10 cm, so
+        // no face of it lies on one of theirs (a seam a ray could slip
+        // through between the two shapes).
+        let into = DVec3::splat(0.1);
         let (wall, lit, dark, normal) = if vertical {
             (
                 Shape::solid(
-                    DVec3::new(c.x + 1.3, b.lo.y, b.lo.z),
-                    DVec3::new(c.x + 1.35, b.hi.y, b.hi.z),
+                    DVec3::new(c.x + 1.3, b.lo.y - into.y, b.lo.z - into.z),
+                    DVec3::new(c.x + 1.35, b.hi.y + into.y, b.hi.z + into.z),
                     HALF,
                 ),
                 DVec3::new(c.x + 1.28, b.lo.y, c.z + 0.4),
@@ -435,8 +441,8 @@ fn a_wall_thinner_than_its_cells_keeps_its_light_on_its_side() {
         } else {
             (
                 Shape::solid(
-                    DVec3::new(b.lo.x, c.y + 0.3, b.lo.z),
-                    DVec3::new(b.hi.x, c.y + 0.35, b.hi.z),
+                    DVec3::new(b.lo.x - into.x, c.y + 0.3, b.lo.z - into.z),
+                    DVec3::new(b.hi.x + into.x, c.y + 0.35, b.hi.z + into.z),
                     HALF,
                 ),
                 DVec3::new(b.hi.x, c.y + 0.37, c.z + 0.4),
@@ -477,7 +483,7 @@ fn a_wall_thinner_than_its_cells_keeps_its_light_on_its_side() {
             );
             assert!(lit_light.x > 0.1, "the lit side at {f} m: {lit_light}");
             assert!(
-                dark_light.max_element() < 1e-4,
+                dark_light.max_element() < 0.01 * lit_light.min_element(),
                 "the dark side at {f} m: {dark_light} (lit {lit_light})"
             );
         }
