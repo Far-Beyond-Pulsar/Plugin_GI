@@ -83,8 +83,8 @@ const GATHER_TAGS: u32 = 4u;
 // direction (16:16 octahedral), its normal (8:8) and the luminance of the
 // cache's light at the sample when it was taken (a half: what a re-trace
 // compares); the kept sample as a direction from the receiver (16:16) and a
-// distance (below 0: the sky), its normal (8:8, the side the ray met) and
-// how many samples' worth the reservoir holds (M, a half); the light it
+// distance (below 0: the sky), its normal (12:12, the side the ray met) and
+// how many samples' worth the reservoir holds (M, 8 bits in 16ths); the light it
 // sends to the receiver (`scene_pack_radiance`) and its unbiased
 // contribution weight W (area measure for a point, solid angle for the sky).
 struct GatherReservoir {

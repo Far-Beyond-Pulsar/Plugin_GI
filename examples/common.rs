@@ -301,7 +301,10 @@ impl SurfaceCapture {
     ) -> bool {
         self.frame += 1;
         let index = self.frame.wrapping_sub(self.at);
-        let Some(base) = self.path.as_deref().filter(|_| self.frame >= self.at && index < self.count)
+        let Some(base) = self
+            .path
+            .as_deref()
+            .filter(|_| self.frame >= self.at && index < self.count)
         else {
             return false;
         };

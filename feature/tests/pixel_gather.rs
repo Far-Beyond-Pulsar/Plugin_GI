@@ -485,13 +485,13 @@ fn occluded_reuse(motion: Option<fn(u64) -> Camera>) {
         run.motion = motion;
         run.settle_means(if reuse { "reuse" } else { "plain" });
         means.push(run.mean(512));
-        signals.push(run.signal_mean(128));
+        signals.push(run.signal_mean(512));
     }
     // Which side a pixel is on, from the plain rays' image: the far side is
     // the pixels the plain rays leave under a twentieth of the lit floor's
-    // level that have a lit pixel within two blocks along their row (where
-    // a reservoir from across the wall would land), the near side's those
-    // over half of it.
+    // level that have a lit pixel within three blocks along their row (the
+    // spatial reuse's reach: where a reservoir from across the wall would
+    // land), the near side's those over half of it.
     let luminance = |p: &[f32; 4]| p[0] + p[1] + p[2];
     let mut levels: Vec<f32> = means[0].iter().map(luminance).collect();
     levels.sort_by(f32::total_cmp);
@@ -505,7 +505,7 @@ fn occluded_reuse(motion: Option<fn(u64) -> Camera>) {
         }
         let (x, y) = (i % width, i / width);
         l < 0.05 * lit_level
-            && (x.saturating_sub(8)..(x + 9).min(width))
+            && (x.saturating_sub(12)..(x + 13).min(width))
                 .any(|k| luminance(&means[0][y * width + k]) > 0.5 * lit_level)
     };
     let band = |dark: bool| -> [f32; 2] {
@@ -529,16 +529,29 @@ fn occluded_reuse(motion: Option<fn(u64) -> Camera>) {
     let side = width / texels;
     let raw = |dark: bool| -> [f32; 2] {
         let mut sums = [0.0f32; 2];
-        for t in 0..signals[0].len() {
+        for (t, (plain, reused)) in signals[0].iter().zip(&signals[1]).enumerate() {
             let (tx, ty) = (t % texels, t / texels);
-            let take = classify((ty * side + side / 2) * width + tx * side + side / 2, dark);
-            if take {
-                sums[0] += signals[0][t];
-                sums[1] += signals[1][t];
+            if classify((ty * side + side / 2) * width + tx * side + side / 2, dark) {
+                sums[0] += plain;
+                sums[1] += reused;
             }
         }
         sums
     };
+    // The denoiser's output against its input over the whole image: the
+    // resolved indirect diffuse (irradiance / pi, summed over rgb) against
+    // the signal's luminance (irradiance), 3 / pi for grey light where the
+    // denoiser keeps the mean.
+    let whole = |k: usize| -> f32 {
+        let out = means[k].iter().map(luminance).sum::<f32>() / means[k].len() as f32;
+        let input = signals[k].iter().sum::<f32>() / signals[k].len() as f32;
+        out / input * std::f32::consts::PI / 3.0
+    };
+    eprintln!(
+        "the denoiser's output over its input (1: the mean kept): plain {:.4}, reuse {:.4}",
+        whole(0),
+        whole(1)
+    );
     let [raw_dark_plain, raw_dark_reuse] = raw(true);
     let [raw_lit_plain, raw_lit_reuse] = raw(false);
     eprintln!(
