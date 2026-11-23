@@ -42,7 +42,7 @@ use crate::{
 };
 
 /// The snippets `gi_light.wgsl` is built with.
-pub(crate) const SNIPPETS: [helio_core::shader::ShaderSnippet; 10] = [
+pub(crate) const SNIPPETS: [helio_core::shader::ShaderSnippet; 11] = [
     SKY_SNIPPET,
     SKY_RADIANCE_SNIPPET,
     stream::SNIPPET,
@@ -53,6 +53,7 @@ pub(crate) const SNIPPETS: [helio_core::shader::ShaderSnippet; 10] = [
     GI_COMMON_SNIPPET,
     GI_SAMPLE_SNIPPET,
     GI_RAYS_SNIPPET,
+    crate::GI_HIT_SNIPPET,
 ];
 
 fn module(device: &wgpu::Device) -> wgpu::ShaderModule {
@@ -104,24 +105,6 @@ impl GiLightPass {
             storage(1, true),
             storage(2, true),
             uniform(3, SKY_FRAME_BYTES),
-            // The sky a ray that meets nothing takes (`sky_radiance_eval`):
-            // the radiance table, its sampler.
-            wgpu::BindGroupLayoutEntry {
-                binding: 4,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D3,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 24,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            },
             uniform(5, TRACE_BYTES),
             storage(6, true),
             storage(7, true),
@@ -130,6 +113,7 @@ impl GiLightPass {
             storage(13, false),
             storage(14, false),
         ];
+        entries.extend(crate::sky_radiance_layout(4, 24));
         entries.extend(cache_entries());
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("GI light"),

@@ -214,12 +214,12 @@ impl ApplicationHandler for App {
         }));
         // GI's default probe spacing (half a metre) suits pillars and pews a
         // few metres apart.
-        let config = RendererConfig::new(size.width, size.height, format).with_feature(
-            helio_light_api::ShadowSettings {
+        let config = RendererConfig::new(size.width, size.height, format)
+            .with_feature(helio_light_api::ShadowSettings {
                 quality: helio_light_api::ShadowQuality::Ultra,
                 ..Default::default()
-            },
-        );
+            })
+            .with_feature(common::gi_settings(Default::default()));
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let graph_scene_db = scene_db_handle(&scene_db);
         let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())

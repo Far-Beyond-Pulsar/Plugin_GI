@@ -420,7 +420,10 @@ impl Harness {
         let mut scene = scene_db(&device, &queue);
         let runtime = VgRuntime::default();
         build(&mut scene.world, &runtime);
-        let config = RendererConfig::new(64, 64, wgpu::TextureFormat::Rgba8Unorm);
+        // GI at its default quality: the probes', the cache's and the
+        // pixels' rays through the proxies.
+        let config = RendererConfig::new(64, 64, wgpu::TextureFormat::Rgba8Unorm)
+            .with_feature(helio_pass_gi::GiSettings::default());
         let renderer =
             RendererBuilder::new(config.clone(), scene.world.gpu_mirror().cloned().unwrap())
                 .with_graph(helio_mesh_host::presets::with(

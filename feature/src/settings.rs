@@ -4,13 +4,69 @@
 //! engines build their settings UI from it and read the values back
 //! through it.
 
-use helio_settings::{integer, number, Group, Resolved};
+use helio_frame_api::denoise::TraceBlock;
+use helio_settings::{choice, integer, number, pick, toggle, Choice, Group, Resolved};
 
 use crate::cache::{CacheConfig, DEFAULT_RAYS, DEFAULT_SLOTS_LOG2};
+use crate::gather::GatherConfig;
 use crate::GiConfig;
 
+/// What GI's indirect diffuse at a pixel is ([`GiSettings::quality`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum GiQuality {
+    /// The probes' irradiance, interpolated at every pixel: no rays of the
+    /// pixels' own (the cheapest; no detail finer than the probes'
+    /// spacing).
+    Probes,
+    /// The pixels' gather: one ray to each block of `block` internal pixels,
+    /// lit from the radiance cache, reused across frames and neighbours,
+    /// denoised; the probes where it has no light yet.
+    Pixels(TraceBlock),
+}
+
+impl GiQuality {
+    /// The default: the pixels' gather at one ray a 4x4 block, the cheapest
+    /// gather, which halved the cathedral's per-pixel error against the
+    /// reference path tracer (rendering.md, "Indirect diffuse at a pixel":
+    /// the measured cost and error of each).
+    pub const DEFAULT: Self = Self::Pixels(TraceBlock::Sixteen);
+
+    /// The setting's value (`quality` in [`GI`]).
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Probes => "probes",
+            Self::Pixels(TraceBlock::Sixteen) => "pixels_16",
+            Self::Pixels(TraceBlock::Four) => "pixels_4",
+            Self::Pixels(TraceBlock::One) => "pixels_1",
+        }
+    }
+
+    /// The quality a setting's value names.
+    pub fn from_key(key: &str) -> Option<Self> {
+        QUALITIES
+            .iter()
+            .map(|c| c.value)
+            .zip([
+                Self::Probes,
+                Self::Pixels(TraceBlock::Sixteen),
+                Self::Pixels(TraceBlock::Four),
+                Self::Pixels(TraceBlock::One),
+            ])
+            .find(|(value, _)| *value == key)
+            .map(|(_, q)| q)
+    }
+}
+
+/// [`GiQuality`]'s choices, cheapest first.
+const QUALITIES: &[Choice] = &[
+    choice("probes", "Probes only"),
+    choice("pixels_16", "Pixels' rays, 1 in 16"),
+    choice("pixels_4", "Pixels' rays, 1 in 4"),
+    choice("pixels_1", "Pixels' rays, every pixel"),
+];
+
 /// GI's settings (a renderer config's `features`).
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GiSettings {
     /// The finest probes' spacing (metres), or `None` for the default
     /// ([`crate::DEFAULT_FINEST_SPACING`], half a metre: rooms, pillars and
@@ -28,6 +84,25 @@ pub struct GiSettings {
     /// larger cap converges a moving view's cells sooner; a settled scene
     /// spends the refresh alone.
     pub cache_rays: Option<u32>,
+    /// What the indirect diffuse at a pixel is: the probes', or the pixels'
+    /// gather at a ray budget ([`GiQuality`]).
+    pub quality: GiQuality,
+    /// Whether the pixels' gather reuses its samples across frames and
+    /// neighbours (ReSTIR GI). Off: one plain cosine-distributed ray a traced
+    /// pixel, as noisy as that (the estimate reuse is checked against).
+    pub pixel_reuse: bool,
+}
+
+impl Default for GiSettings {
+    fn default() -> Self {
+        Self {
+            probe_spacing: None,
+            cache_slots_log2: None,
+            cache_rays: None,
+            quality: GiQuality::DEFAULT,
+            pixel_reuse: true,
+        }
+    }
 }
 
 impl GiSettings {
@@ -41,6 +116,13 @@ impl GiSettings {
                 self.cache_slots_log2.unwrap_or(DEFAULT_SLOTS_LOG2),
                 self.cache_rays.unwrap_or(DEFAULT_RAYS),
             ),
+            pixels: match self.quality {
+                GiQuality::Probes => None,
+                GiQuality::Pixels(block) => Some(GatherConfig {
+                    block,
+                    reuse: self.pixel_reuse,
+                }),
+            },
         }
     }
 }
@@ -81,6 +163,25 @@ pub static GI: Group = Group {
             "The most rays a frame the radiance cache spends lighting surfaces, by need (1024 \
              up; more converge a moving view's cells sooner); 0: the default, 32768",
         ),
+        pick(
+            "quality",
+            "GI Quality",
+            "Global Illumination",
+            QUALITIES,
+            "pixels_16",
+            "Indirect diffuse at a pixel: the probes' (cheapest), or rays from the pixels \
+             themselves (one a block of 16, 4 or every pixel), lit from the radiance cache, \
+             reused across frames and neighbours and denoised: contact detail and occlusion the \
+             probes cannot resolve",
+        ),
+        toggle(
+            "pixel_reuse",
+            "GI Sample Reuse",
+            "Global Illumination",
+            true,
+            "The pixels' rays reuse their samples across frames and neighbours (ReSTIR GI): \
+             less noise for the same rays",
+        ),
     ],
 };
 
@@ -92,6 +193,8 @@ impl GiSettings {
             probe_spacing: settings.optional("probe_spacing").map(|m| m as f32),
             cache_slots_log2: settings.optional("radiance_cache_slots").map(|n| n as u32),
             cache_rays: settings.optional("radiance_cache_rays").map(|n| n as u32),
+            quality: GiQuality::from_key(settings.text("quality")).unwrap_or(GiQuality::DEFAULT),
+            pixel_reuse: settings.bool("pixel_reuse"),
         }
     }
 }
@@ -105,6 +208,33 @@ mod tests {
         assert_eq!(
             GiSettings::from_settings(&GI.defaults()),
             GiSettings::default()
+        );
+    }
+
+    #[test]
+    fn every_quality_has_its_choice() {
+        for q in [
+            GiQuality::Probes,
+            GiQuality::Pixels(TraceBlock::Sixteen),
+            GiQuality::Pixels(TraceBlock::Four),
+            GiQuality::Pixels(TraceBlock::One),
+        ] {
+            assert_eq!(GiQuality::from_key(q.key()), Some(q));
+        }
+        assert_eq!(
+            GI.setting("quality").unwrap().default,
+            helio_settings::Value::Text(GiQuality::DEFAULT.key().into())
+        );
+        let probes = GI.resolve(|key| {
+            (key == "quality").then(|| helio_settings::Value::Text("probes".into()))
+        });
+        assert_eq!(GiSettings::from_settings(&probes).config().pixels, None);
+        assert_eq!(
+            GiSettings::default().config().pixels,
+            Some(GatherConfig {
+                block: TraceBlock::Sixteen,
+                reuse: true
+            })
         );
     }
 

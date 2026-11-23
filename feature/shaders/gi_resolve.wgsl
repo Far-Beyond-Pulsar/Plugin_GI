@@ -3,11 +3,16 @@
 //!use frame_radiance_cache
 //!use gi_common
 //!use gi_sample
-// The probes' irradiance at every pixel (README.md, "Deferred lighting"):
-// a pixel's word pair of `gi_irradiance` (rows of the frame) holds its
-// irradiance / pi (rgb, half floats) and how much the probes hold it (the
-// fourth half: 0 past the clipmap, or for the sky). Its debug views show
-// the probes (GI_PROBES_VIEW) or the radiance cache (RADIANCE_CACHE_VIEW).
+//!use frame_denoise_irradiance
+// The frame's indirect diffuse at every pixel (README.md, "Deferred
+// lighting"): a pixel's word pair of `gi_irradiance` (rows of the frame)
+// holds its irradiance / pi (rgb, half floats) and how much it holds the
+// pixel (the fourth half: 0 past the clipmap, or for the sky).
+// `gi_resolve`: the probes' irradiance. `gi_resolve_pixels`: the pixels'
+// gather (`gi_gather.wgsl`) as the frame's denoiser filtered it, times the
+// near field, the probes' where it has no light yet or a remap put the
+// pixel in another space. Its debug views show the probes (GI_PROBES_VIEW)
+// or the radiance cache (RADIANCE_CACHE_VIEW).
 
 @group(0) @binding(0) var<uniform> frame_gi: GiFrame;
 @group(0) @binding(1) var<storage, read> gi_probes: array<u32>;
@@ -25,9 +30,19 @@
 @group(0) @binding(10) var<uniform> radiance_cache_frame: RadianceCacheFrame;
 @group(0) @binding(11) var<storage, read_write> radiance_cache_slots: array<RadianceCacheSlot>;
 @group(0) @binding(12) var<storage, read_write> radiance_cache_entries: array<RadianceCacheEntry>;
+// The pixels' gather (`gi_resolve_pixels` only): x the traced block's side,
+// y the frame (the denoiser's), z 1 when `gathered` is the denoiser's output
+// (else the gather's own signal, a texel a block).
+@group(0) @binding(13) var<uniform> resolve_gather: vec4<u32>;
+@group(0) @binding(14) var gathered0: texture_2d<f32>;
+@group(0) @binding(15) var gathered1: texture_2d<f32>;
+// The near field (`gather_near`): y what the gathered irradiance is
+// multiplied by at the pixel.
+@group(0) @binding(16) var near_field: texture_2d<f32>;
 
 const GI_PROBES_VIEW: u32 = 36u;
 const RADIANCE_CACHE_VIEW: u32 = 39u;
+const GI_NEAR_FIELD_VIEW: u32 = 37u;
 const PI: f32 = 3.14159265;
 
 // The cache's cell a ray of footprint `footprint` meeting frame point `p`
@@ -65,41 +80,116 @@ fn probe_view(p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(0.0);
 }
 
+// A pixel's surface: its frame point and normal (in the space a remap put
+// its content in), and whether it holds one the probes can light (none: the
+// sky, or content in another coordinate space than the clipmap's).
+struct Pixel {
+    position: vec3<f32>,
+    normal: vec3<f32>,
+    remapped: bool,
+    lit: bool,
+}
+
+fn pixel_at(id: vec2<u32>, size: vec2<u32>) -> Pixel {
+    var px: Pixel;
+    let depth = textureLoad(gbuf_depth, vec2<i32>(id), 0);
+    if helio_is_sky(depth) { return px; }
+    let uv = (vec2<f32>(id) + 0.5) / vec2<f32>(size);
+    let h = cameras[0].view_proj_inv * vec4<f32>(helio_uv_to_ndc(uv), depth, 1.0);
+    px.position = h.xyz / h.w;
+    px.normal = normalize(textureLoad(gbuf_normal, vec2<i32>(id), 0).xyz);
+    px.lit = true;
+    if resolve_view.y != 0u {
+        let remap = gbuffer_remap_of(textureLoad(surface_tags, vec2<i32>(id), 0).xy);
+        if remap >= 0 {
+            let r = u32(remap);
+            px.remapped = true;
+            // The active probe clipmap is built for the unpartitioned world.
+            if remap_spaces[r / 4u][r % 4u] != 0u {
+                px.lit = false;
+                return px;
+            }
+            let unmap = view_remaps[r];
+            px.position = (unmap * vec4<f32>(px.position, 1.0)).xyz;
+            px.normal = normalize((unmap * vec4<f32>(px.normal, 0.0)).xyz);
+        }
+    }
+    return px;
+}
+
+// The probes' irradiance / pi at a pixel, or its debug views'.
+fn probes_at(id: vec2<u32>, size: vec2<u32>, px: Pixel) -> vec4<f32> {
+    let p = px.position - cameras[0].position_near.xyz;
+    var e = gi_irradiance(p, px.normal);
+    if resolve_view.x == GI_PROBES_VIEW { e = vec4<f32>(probe_view(p, px.normal), 1.0); }
+    if resolve_view.x == RADIANCE_CACHE_VIEW {
+        // A pixel's footprint: the next pixel's point at this depth.
+        let depth = textureLoad(gbuf_depth, vec2<i32>(id), 0);
+        let uv = (vec2<f32>(id) + 0.5) / vec2<f32>(size);
+        let h = cameras[0].view_proj_inv * vec4<f32>(helio_uv_to_ndc(uv), depth, 1.0);
+        let next = cameras[0].view_proj_inv * vec4<f32>(helio_uv_to_ndc(uv + vec2<f32>(1.0 / f32(size.x), 0.0)), depth, 1.0);
+        e = cache_view(px.position, px.normal, length(next.xyz / next.w - h.xyz / h.w));
+    }
+    return e;
+}
+
+fn store(at: u32, e: vec4<f32>) {
+    out_irradiance[at] = vec2<u32>(pack2x16float(e.rg), pack2x16float(vec2<f32>(e.b, e.a)));
+}
+
 @compute @workgroup_size(8, 8)
 fn gi_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     let size = textureDimensions(gbuf_depth);
     if id.x >= size.x || id.y >= size.y { return; }
     let at = id.y * size.x + id.x;
-    let depth = textureLoad(gbuf_depth, vec2<i32>(id.xy), 0);
-    if helio_is_sky(depth) {
+    let px = pixel_at(id.xy, size);
+    if !px.lit {
         out_irradiance[at] = vec2<u32>(0u);
         return;
     }
-    let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(size);
-    let h = cameras[0].view_proj_inv * vec4<f32>(helio_uv_to_ndc(uv), depth, 1.0);
-    var position = h.xyz / h.w;
-    var n = normalize(textureLoad(gbuf_normal, vec2<i32>(id.xy), 0).xyz);
-    if resolve_view.y != 0u {
-        let remap = gbuffer_remap_of(textureLoad(surface_tags, vec2<i32>(id.xy), 0).xy);
-        if remap >= 0 {
-            let r = u32(remap);
-            // The active probe clipmap is built for the unpartitioned world.
-            if remap_spaces[r / 4u][r % 4u] != 0u {
-                out_irradiance[at] = vec2<u32>(0u);
-                return;
-            }
-            let unmap = view_remaps[r];
-            position = (unmap * vec4<f32>(position, 1.0)).xyz;
-            n = normalize((unmap * vec4<f32>(n, 0.0)).xyz);
-        }
+    store(at, probes_at(id.xy, size, px));
+}
+
+// The gathered irradiance at pixel `id` (normal `n`), or below 0 where the
+// gather has no light there yet.
+fn gathered_at(id: vec2<u32>, size: vec2<u32>, n: vec3<f32>) -> vec4<f32> {
+    if resolve_gather.z != 0u {
+        let o0 = textureLoad(gathered0, vec2<i32>(id), 0);
+        if o0.w < 0.0 { return vec4<f32>(-1.0); }
+        return vec4<f32>(denoise_irradiance(o0, textureLoad(gathered1, vec2<i32>(id), 0), n), 1.0);
     }
-    let p = position - cameras[0].position_near.xyz;
-    var e = gi_irradiance(p, n);
-    if resolve_view.x == GI_PROBES_VIEW { e = vec4<f32>(probe_view(p, n), 1.0); }
-    if resolve_view.x == RADIANCE_CACHE_VIEW {
-        // A pixel's footprint: the next pixel's point at this depth.
-        let next = cameras[0].view_proj_inv * vec4<f32>(helio_uv_to_ndc(uv + vec2<f32>(1.0 / f32(size.x), 0.0)), depth, 1.0);
-        e = cache_view(position, n, length(next.xyz / next.w - h.xyz / h.w));
+    // The gather's own signal, a texel a block, at its traced pixel's normal.
+    let side = resolve_gather.x;
+    let block = id / side;
+    let traced = denoise_traced_pixel(block, resolve_gather.y, side, size);
+    let n0 = normalize(textureLoad(gbuf_normal, vec2<i32>(traced), 0).xyz);
+    let s0 = textureLoad(gathered0, vec2<i32>(block), 0);
+    let s1 = textureLoad(gathered1, vec2<i32>(block), 0);
+    return vec4<f32>(denoise_irradiance_input(s0, s1, n0, n), 1.0);
+}
+
+@compute @workgroup_size(8, 8)
+fn gi_resolve_pixels(@builtin(global_invocation_id) id: vec3<u32>) {
+    let size = textureDimensions(gbuf_depth);
+    if id.x >= size.x || id.y >= size.y { return; }
+    let at = id.y * size.x + id.x;
+    let px = pixel_at(id.xy, size);
+    if !px.lit {
+        out_irradiance[at] = vec2<u32>(0u);
+        return;
     }
-    out_irradiance[at] = vec2<u32>(pack2x16float(e.rg), pack2x16float(vec2<f32>(e.b, e.a)));
+    var e = vec4<f32>(-1.0);
+    if !px.remapped && resolve_view.x != GI_PROBES_VIEW && resolve_view.x != RADIANCE_CACHE_VIEW {
+        e = gathered_at(id.xy, size, px.normal);
+    }
+    if e.w < 0.0 {
+        store(at, probes_at(id.xy, size, px));
+        return;
+    }
+    let near = textureLoad(near_field, vec2<i32>(id.xy), 0).y;
+    if resolve_view.x == GI_NEAR_FIELD_VIEW {
+        store(at, vec4<f32>(vec3<f32>(near), 1.0));
+        return;
+    }
+    store(at, vec4<f32>(e.rgb * near / PI, 1.0));
 }

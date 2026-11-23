@@ -57,6 +57,11 @@ pub const GI_PROBES_VIEW: u32 = 36;
 /// pixel-wide ray's read finds at each pixel's surface; deferred lighting
 /// shows it as it shows `gi_irradiance`).
 pub const RADIANCE_CACHE_VIEW: u32 = 39;
+/// Debug mode of the near field's view (`GiResolvePass` with the pixels'
+/// gather: what a pixel's gathered irradiance is multiplied by, the
+/// occlusion within a block's footprint; deferred lighting shows it as it
+/// shows `gi_irradiance`).
+pub const GI_NEAR_FIELD_VIEW: u32 = 37;
 
 /// The probes' shared WGSL (`gi_common.wgsl`: the clipmap, a probe's record,
 /// its rays' directions): a reader opts in with `//!use gi_common`.

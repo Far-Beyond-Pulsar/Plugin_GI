@@ -169,7 +169,8 @@ type PassTimes = (
 /// `HELIO_CAPTURE_FRAME` (default 240: probes, shadows and temporal
 /// effects settled) and exits; with `HELIO_CAPTURE_FRAMES=<n>` (default 1)
 /// the `n` frames from there, as `<png>` with `_<k>` before its extension
-/// (frames to average: one frame of a stochastic estimate is noisy). The surface needs [`Self::usage`]. With
+/// (frames to average, and their per-frame noise: one frame of a stochastic
+/// estimate is noisy). The surface needs [`Self::usage`]. With
 /// `HELIO_CAPTURE_TIMINGS` set it also prints each pass's median GPU time
 /// over the frames from 60 to the capture (the renderer's timing snapshot,
 /// [`Self::timings`]): frames run as the host runs them, pipelined; and the
@@ -631,6 +632,20 @@ pub fn features() -> helio_feature_api::FeatureSet {
 }
 
 /// The deferred preset with the lighting plugins' features.
+/// GI's settings `settings` with an A/B run's choice of GI over them:
+/// `HELIO_GI_QUALITY` (`probes`, `pixels_16`, `pixels_4`, `pixels_1`: the
+/// `gi` group's `quality`) and `HELIO_GI_PIXEL_REUSE=0` (no sample reuse).
+pub fn gi_settings(mut settings: helio_pass_gi::GiSettings) -> helio_pass_gi::GiSettings {
+    if let Ok(quality) = std::env::var("HELIO_GI_QUALITY") {
+        settings.quality = helio_pass_gi::GiQuality::from_key(&quality)
+            .unwrap_or_else(|| panic!("HELIO_GI_QUALITY: no quality `{quality}`"));
+    }
+    if let Ok(reuse) = std::env::var("HELIO_GI_PIXEL_REUSE") {
+        settings.pixel_reuse = reuse != "0";
+    }
+    settings
+}
+
 pub fn preset() -> helio_presets::PresetGraph {
     helio_mesh_host::presets::with(helio_presets::Preset::Deferred, &features())
 }

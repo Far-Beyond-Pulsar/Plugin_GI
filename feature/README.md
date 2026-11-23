@@ -278,6 +278,75 @@ reflections). GI publishes it (`cache.rs`, `gi_cache.wgsl`):
   `radiance_cache_rays` (the most a frame, default 32,768). Where each
   constant comes from: `cache.rs`'s module docs.
 
+## The pixels' gather
+
+With the `quality` setting at `pixels_16`, `pixels_4` or `pixels_1` (the
+`gi` host group; default `pixels_16`), the resolve node builds the pixels'
+gather before the resolve, in the primary view (captures and other views
+resolve the probes). Frame contracts only (`gather.rs`, `gi_gather.wgsl`):
+
+1. **`GiGatherPass`** (`gather_near`, a pixel): the near field. One ray a
+   block misses occlusion nearer than the block's footprint; a horizon
+   search over the depth buffer, every pixel out to the block's side along
+   4 slices (both sides), counts occluders within that footprint and no
+   farther (the share of the cosine-weighted hemisphere left open, `V`). A
+   surface whose occlusion is its own (`gbuffer_own_occlusion`: a traced
+   terrain, a meadow) brings its `V` as its material occlusion, which the
+   lighting multiplies in itself. Each pixel's factor is its `V` over the
+   block's mean `V`: the near field moves light between a block's pixels
+   and never changes their mean (no division by the traced pixel's `V`,
+   which counted again the light a ray brings back from a near occluder; no
+   floor). (`gather_rays`, a traced texel): its traced pixel
+   (`denoise_traced_pixel`, the denoiser's rotation) sends one ray,
+   cosine-distributed about the G-buffer normal (Roberts' R2 over frames,
+   shifted by a hash of the texel), into the stream `gi_pixels`; one texel
+   in 4 also re-traces its previous reservoir's sample.
+2. The tracers answer the stream (`stream::trace`): terrain and meshes alike,
+   with or without ray queries (whichever tracers the device runs).
+3. **`GiGatherHitsPass`** (`gather_hits`): each hit's light. Where the
+   cache's cell at the hit is no wider than the ray is long, the cell's
+   light (`gi_hit`, as the probes' hits take it, the cell claimed); a cell
+   wider than that averages light the hit does not see (the floor past a
+   contact, the lit side of a thin wall), so there the cell's indirect part
+   alone, read without claiming it, and a light query for the hit's own
+   direct light into the light batch `gi_pixels` (the probes stand in, with
+   no light of their own added, where the cache has no cell). The frame's
+   light samplers answer (`light_samples::sample`).
+4. **`GiGatherShadowPass`** (`gather_shadow`): each sample's light at its
+   hit (`gi_hit_direct`), waiting on a shadow ray from the light's side, the
+   rays compacted into the stream `gi_pixels_shadow`. The tracers answer.
+5. **`GiGatherShadePass`**: `gather_validate` (a re-traced sample's cache
+   light now against the luminance kept with it: a change beyond the
+   cache's own noise, 1/sqrt(32), lowers the confidence written for the
+   denoiser and the reservoir's M; a ray that now meets something else
+   drops the reservoir), `gather_temporal` (this frame's sample combined by
+   generalised RIS with the reservoir where the pixel was, from the frame's
+   history's taps, M capped at 8), `gather_spatial` (combined with 4
+   neighbours' within 3 texels, balance-heuristic MIS over their receivers;
+   not kept) and, where the chosen sample was taken by another receiver (the
+   previous frame's, a neighbour's), a visibility ray to it into the stream
+   `gi_pixels_visibility`. The tracers answer. Reservoirs are 32 bytes:
+   the receiver as a distance and direction from the eye, normals in 8:8
+   octahedral, M and the kept cache luminance as half floats.
+6. **`GiGatherSignalPass`** (`gather_signal`): the chosen sample's estimate
+   times what its visibility ray lets through (an occluded reuse gives
+   none), the probes' irradiance where the texel has no sample; written
+   as the denoiser's irradiance signal (`denoise_irradiance_add`), the hit
+   distance no nearer than a block's footprint.
+7. The frame's denoiser (`denoise::filter`).
+8. **`GiResolvePass`** (`gi_resolve_pixels`): the filtered irradiance at each
+   pixel's normal times its near-field factor, into `INDIRECT_DIFFUSE` in
+   its encoding; the probes' where the gather has no light yet or a remap
+   put the pixel in another space. View 37 (`GI Near Field`) shows the
+   factor.
+
+GI offers `indirect_occlusion` as its rays' start off the surface (2 mm): a
+kind's own short-range term (the terrain's sky rays) keeps its minimum
+reach, and never darkens twice (the near field keeps each block's mean).
+Constants' derivations: `gather.rs`'s docs and Helio's `rendering.md`,
+section 5, "Indirect diffuse at a pixel" (with the measured cost and error
+of each setting).
+
 ## Costs
 
 2720 probe updates a frame (174k probe rays) and the cache's light by need

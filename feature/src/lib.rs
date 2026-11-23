@@ -48,19 +48,25 @@ use std::collections::VecDeque;
 
 pub mod cache;
 mod feature;
+pub mod gather;
 mod integrate;
 mod light;
 pub mod settings;
 pub use cache::{CacheConfig, RadianceCache, RadianceCacheFold};
 pub use feature::GiFeature;
+pub use gather::{
+    GatherConfig, GiGatherHitsPass, GiGatherPass, GiGatherShadePass, GiGatherShadowPass,
+    GiGatherSignalPass,
+};
 pub use integrate::{GiIntegratePass, Held};
 pub use light::{GiLightPass, GiShadowPass};
-pub use settings::{GiSettings, GI};
+pub use settings::{GiQuality, GiSettings, GI};
 
 pub use helio_gi_api::{
     eye, Clipmap, GpuFrame, GpuLevel, DEFAULT_FINEST_SPACING, FRAME_BYTES, GI_COMMON_SNIPPET,
-    GI_FRAME, GI_IRRADIANCE, GI_PROBES, GI_PROBES_VIEW, GI_SAMPLE_SNIPPET, LEVELS, LEVEL_PROBES,
-    LEVEL_UPDATES, MAX_RAYS, MAX_UPDATES, PROBES, PROBE_WORDS, RADIANCE_CACHE_VIEW, RAYS, SIDE,
+    GI_FRAME, GI_IRRADIANCE, GI_NEAR_FIELD_VIEW, GI_PROBES, GI_PROBES_VIEW, GI_SAMPLE_SNIPPET,
+    LEVELS, LEVEL_PROBES, LEVEL_UPDATES, MAX_RAYS, MAX_UPDATES, PROBES, PROBE_WORDS,
+    RADIANCE_CACHE_VIEW, RAYS, SIDE,
 };
 
 /// GI's rays (`SceneRay`, a row a ray): the probes' first, probe-major (64 a
@@ -111,11 +117,12 @@ const TRACE_BYTES: u64 = std::mem::size_of::<GpuTrace>() as u64;
 const PENDING_BYTES: u64 = 16;
 
 /// The snippets `gi_resolve.wgsl` is built with.
-const RESOLVE_SNIPPETS: [helio_core::shader::ShaderSnippet; 4] = [
+const RESOLVE_SNIPPETS: [helio_core::shader::ShaderSnippet; 5] = [
     stream::SNIPPET,
     radiance_cache::SNIPPET,
     GI_COMMON_SNIPPET,
     GI_SAMPLE_SNIPPET,
+    helio_frame_api::denoise::IRRADIANCE_SNIPPET,
 ];
 
 /// The snippets `gi_update.wgsl` is built with.
@@ -125,6 +132,14 @@ const UPDATE_SNIPPETS: [helio_core::shader::ShaderSnippet; 3] =
 /// The probe rays' WGSL (`gi_rays.wgsl`, `//!use gi_rays`).
 const GI_RAYS_SNIPPET: helio_core::shader::ShaderSnippet =
     helio_core::wgsl_snippet!("//!use gi_rays", "../shaders/gi_rays.wgsl");
+
+/// How GI lights a ray's hit or miss (`gi_hit.wgsl`, `//!use gi_hit`): the
+/// sky along a direction, a hit's light from the radiance cache (the probes
+/// standing in where it has none), what a hit sends back along its ray. The
+/// one copy every reader of GI's streams (the probes' and the cache's rays,
+/// the pixels' rays) lights its hits with.
+pub(crate) const GI_HIT_SNIPPET: helio_core::shader::ShaderSnippet =
+    helio_core::wgsl_snippet!("//!use gi_hit", "../shaders/gi_hit.wgsl");
 
 /// Which probes update each frame: per level, those that came in (oldest
 /// first), then the others in turn.
@@ -225,6 +240,29 @@ fn texture(binding: u32) -> wgpu::BindGroupLayoutEntry {
         },
         count: None,
     }
+}
+
+/// The sky a ray that meets nothing takes (`sky_radiance_eval`, `gi_hit`):
+/// the atmosphere's radiance table at `table` and its sampler at `sampler`.
+fn sky_radiance_layout(table: u32, sampler: u32) -> [wgpu::BindGroupLayoutEntry; 2] {
+    [
+        wgpu::BindGroupLayoutEntry {
+            binding: table,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D3,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: sampler,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        },
+    ]
 }
 
 fn entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
@@ -336,14 +374,14 @@ pub struct GiConfig {
     pub finest_spacing: f64,
     /// The radiance cache's capacity and ray budget.
     pub cache: CacheConfig,
+    /// The pixels' gather ([`gather`]), or none: the probes' irradiance at
+    /// every pixel.
+    pub pixels: Option<GatherConfig>,
 }
 
 impl Default for GiConfig {
     fn default() -> Self {
-        Self {
-            finest_spacing: DEFAULT_FINEST_SPACING,
-            cache: CacheConfig::default(),
-        }
+        GiSettings::default().config()
     }
 }
 
@@ -600,14 +638,18 @@ impl RenderPass for GiPass {
     }
 }
 
-/// The probes' irradiance at every pixel (module docs): after the
-/// integration, before deferred lighting. Its debug views show the probes
-/// ([`GI_PROBES_VIEW`]) and the radiance cache's cells
+/// The frame's indirect diffuse at every pixel (module docs): after the
+/// integration, before deferred lighting. The probes' irradiance, or the
+/// pixels' gather as the frame's denoiser filtered it times the near field
+/// ([`Self::with_gather`]; the probes' where it has no light yet). Its debug
+/// views show the probes ([`GI_PROBES_VIEW`]) and the radiance cache's cells
 /// ([`RADIANCE_CACHE_VIEW`]: what a pixel-wide ray's read of the frame's
 /// cache finds at each pixel's surface).
 pub struct GiResolvePass {
     layout: wgpu::BindGroupLayout,
     pipeline: wgpu::ComputePipeline,
+    /// The pixels' gather it resolves, if any.
+    gather: Option<ResolveGather>,
     out: Option<(wgpu::Buffer, [u32; 2])>,
     /// The renderer's debug mode (`GI_PROBES_VIEW` shows the probes), and
     /// the one last written to `view`.
@@ -621,8 +663,70 @@ pub struct GiResolvePass {
     cache: helio_core::gpu_cache::GpuCache,
 }
 
+/// What the resolve reads of the pixels' gather.
+struct ResolveGather {
+    filtered: helio_frame_api::denoise::Filtered,
+    layout: wgpu::BindGroupLayout,
+    pipeline: wgpu::ComputePipeline,
+    /// `resolve_gather` (gi_resolve.wgsl) and the values last written.
+    uniform: wgpu::Buffer,
+    values: [u32; 4],
+    written: Option<[u32; 4]>,
+    reads: &'static [&'static str],
+}
+
 impl GiResolvePass {
-    pub fn new(device: &wgpu::Device) -> Self {
+    /// The resolve of the pixels' gather: `filtered` (what the frame's
+    /// denoiser made of the gather's signal, traced at one pixel a block of
+    /// `side` x `side`) times the near field ([`gather::NEAR_FIELD`]), the
+    /// probes' irradiance where it has no light yet.
+    pub fn with_gather(
+        device: &wgpu::Device,
+        filtered: helio_frame_api::denoise::Filtered,
+        side: u32,
+    ) -> Self {
+        let mut pass = Self::new(device);
+        let mut entries = Self::entries();
+        entries.extend([uniform(13, 16), texture(14), texture(15), texture(16)]);
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("GI resolve pixels"),
+            entries: &entries,
+        });
+        let module = helio_core::shader::module_with(
+            device,
+            "GI resolve",
+            helio_core::include_wgsl!("../shaders/gi_resolve.wgsl"),
+            &RESOLVE_SNIPPETS,
+        );
+        let pipeline_layout = pipeline_layout(device, "GI resolve pixels", &layout);
+        let pipeline = compute(device, &module, &pipeline_layout, "gi_resolve_pixels", &[]);
+        let mut reads = vec![
+            helio_frame_api::gbuffer::GROUP,
+            helio_frame_api::gbuffer::DEPTH,
+            GI_FRAME,
+            GI_PROBES,
+            gather::NEAR_FIELD,
+        ];
+        reads.extend(filtered.textures);
+        pass.gather = Some(ResolveGather {
+            filtered,
+            layout,
+            pipeline,
+            uniform: buffer(
+                device,
+                "GI resolve gather",
+                16,
+                wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            ),
+            values: [side, 0, u32::from(filtered.denoiser.is_some()), 0],
+            written: None,
+            reads: helio_frame_api::static_names(&reads),
+        });
+        pass
+    }
+
+    /// The probes' resolve's bindings (0..12 of `gi_resolve.wgsl`).
+    fn entries() -> Vec<wgpu::BindGroupLayoutEntry> {
         let depth = wgpu::BindGroupLayoutEntry {
             binding: 4,
             visibility: wgpu::ShaderStages::COMPUTE,
@@ -633,23 +737,27 @@ impl GiResolvePass {
             },
             count: None,
         };
+        vec![
+            uniform(0, FRAME_BYTES),
+            storage(1, true),
+            storage(2, true),
+            texture(3),
+            depth,
+            storage(5, false),
+            uniform(6, 16),
+            texture(7),
+            uniform(8, VIEW_REMAPS_BYTES),
+            uniform(9, VIEW_REMAP_SPACES_BYTES),
+            uniform(10, radiance_cache::RadianceCacheFrame::BYTES),
+            storage(11, false),
+            storage(12, false),
+        ]
+    }
+
+    pub fn new(device: &wgpu::Device) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("GI resolve"),
-            entries: &[
-                uniform(0, FRAME_BYTES),
-                storage(1, true),
-                storage(2, true),
-                texture(3),
-                depth,
-                storage(5, false),
-                uniform(6, 16),
-                texture(7),
-                uniform(8, VIEW_REMAPS_BYTES),
-                uniform(9, VIEW_REMAP_SPACES_BYTES),
-                uniform(10, radiance_cache::RadianceCacheFrame::BYTES),
-                storage(11, false),
-                storage(12, false),
-            ],
+            entries: &Self::entries(),
         });
         let module = helio_core::shader::module_with(
             device,
@@ -674,6 +782,7 @@ impl GiResolvePass {
         Self {
             layout,
             pipeline,
+            gather: None,
             out: None,
             view,
             no_remaps,
@@ -709,6 +818,7 @@ impl GiResolvePass {
             size,
             None,
             None,
+            None,
         );
     }
 
@@ -724,6 +834,7 @@ impl GiResolvePass {
         size: [u32; 2],
         remaps: Option<(&wgpu::TextureView, &wgpu::Buffer, &wgpu::Buffer)>,
         cache: Option<[&wgpu::Buffer; 3]>,
+        gathered: Option<[&wgpu::TextureView; 3]>,
     ) {
         let size = [size[0].max(1), size[1].max(1)];
         if self.out.as_ref().is_none_or(|(_, s)| *s != size) {
@@ -755,44 +866,99 @@ impl GiResolvePass {
             &self.no_cache.entries,
         ]);
         let Some((out, _)) = &self.out else { return };
+        // The gather's textures, where it ran this frame (the probes'
+        // resolve where it did not).
+        if let (Some(g), Some(_)) = (self.gather.as_mut(), gathered) {
+            if g.written != Some(g.values) {
+                helio_core::upload::write_buffer(
+                    queue,
+                    &g.uniform,
+                    0,
+                    bytemuck::cast_slice(&g.values),
+                );
+                g.written = Some(g.values);
+            }
+        }
+        let gather = self.gather.as_ref().zip(gathered);
         self.cache.end_frame();
-        let group = self.cache.bind_group(
-            device,
-            &wgpu::BindGroupDescriptor {
-                label: Some("GI resolve"),
-                layout: &self.layout,
-                entries: &[
-                    entry(0, frame),
-                    entry(1, probes),
-                    entry(2, camera),
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::TextureView(normal),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: wgpu::BindingResource::TextureView(depth),
-                    },
-                    entry(5, out),
-                    entry(6, &self.view),
-                    wgpu::BindGroupEntry {
-                        binding: 7,
-                        resource: wgpu::BindingResource::TextureView(surface),
-                    },
-                    entry(8, maps),
-                    entry(9, spaces),
-                    entry(10, cache_frame),
-                    entry(11, slots),
-                    entry(12, entries),
-                ],
+        let common = [
+            entry(0, frame),
+            entry(1, probes),
+            entry(2, camera),
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(normal),
             },
-        );
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(depth),
+            },
+            entry(5, out),
+            entry(6, &self.view),
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: wgpu::BindingResource::TextureView(surface),
+            },
+            entry(8, maps),
+            entry(9, spaces),
+            entry(10, cache_frame),
+            entry(11, slots),
+            entry(12, entries),
+        ];
+        let texture_entry = |binding, view| wgpu::BindGroupEntry {
+            binding,
+            resource: wgpu::BindingResource::TextureView(view),
+        };
+        let (group, pipeline) = match gather {
+            Some((g, [a, b, near])) => {
+                let [e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12] = common;
+                let entries = [
+                    e0,
+                    e1,
+                    e2,
+                    e3,
+                    e4,
+                    e5,
+                    e6,
+                    e7,
+                    e8,
+                    e9,
+                    e10,
+                    e11,
+                    e12,
+                    entry(13, &g.uniform),
+                    texture_entry(14, a),
+                    texture_entry(15, b),
+                    texture_entry(16, near),
+                ];
+                let group = self.cache.bind_group(
+                    device,
+                    &wgpu::BindGroupDescriptor {
+                        label: Some("GI resolve pixels"),
+                        layout: &g.layout,
+                        entries: &entries,
+                    },
+                );
+                (group, &g.pipeline)
+            }
+            None => {
+                let group = self.cache.bind_group(
+                    device,
+                    &wgpu::BindGroupDescriptor {
+                        label: Some("GI resolve"),
+                        layout: &self.layout,
+                        entries: &common,
+                    },
+                );
+                (group, &self.pipeline)
+            }
+        };
         let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("GI resolve"),
             timestamp_writes: None,
         });
         pass.set_bind_group(0, Some(&group), &[]);
-        pass.set_pipeline(&self.pipeline);
+        pass.set_pipeline(pipeline);
         pass.dispatch_workgroups(size[0].div_ceil(8), size[1].div_ceil(8), 1);
     }
 
@@ -808,6 +974,9 @@ impl RenderPass for GiResolvePass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
+        if let Some(g) = &self.gather {
+            return g.reads;
+        }
         &[
             helio_frame_api::gbuffer::GROUP,
             helio_frame_api::gbuffer::DEPTH,
@@ -818,6 +987,15 @@ impl RenderPass for GiResolvePass {
 
     fn writes(&self) -> &'static [&'static str] {
         &[GI_IRRADIANCE]
+    }
+
+    fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        // The traced pixel a pass-through signal's block holds this frame
+        // (the denoiser's frame number).
+        if let Some(g) = &mut self.gather {
+            g.values[1] = ctx.frame_num as u32;
+        }
+        Ok(())
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
@@ -865,6 +1043,14 @@ impl RenderPass for GiResolvePass {
             (Some(frame), Some(slots), Some(entries)) => Some([frame, slots, entries]),
             _ => None,
         };
+        let gathered = self.gather.as_ref().and_then(|g| {
+            let view = |name: &'static str| ctx.registry.texture_view(ResourceKey::new(name));
+            Some([
+                view(g.filtered.textures[0])?,
+                view(g.filtered.textures[1])?,
+                view(gather::NEAR_FIELD)?,
+            ])
+        });
         let mut cmds = ctx.graphics_cmds();
         self.record_with_remaps(
             ctx.device,
@@ -876,6 +1062,7 @@ impl RenderPass for GiResolvePass {
             [ctx.width, ctx.height],
             remaps,
             cache,
+            gathered,
         );
         Ok(())
     }
@@ -890,6 +1077,11 @@ impl RenderPass for GiResolvePass {
                 name: "GI Probes",
                 debug_mode: GI_PROBES_VIEW,
                 description: "Each pixel's nearest GI probe (finest level holding it): its irradiance, dark red inside the ground, dark purple not yet updated; its cell's edges darker",
+            },
+            helio_core::DebugViewDescriptor {
+                name: "GI Near Field",
+                debug_mode: GI_NEAR_FIELD_VIEW,
+                description: "With the pixels' gather: what each pixel's gathered irradiance is multiplied by, the occlusion within a traced block's footprint (white: none; a surface with its own occlusion shows its share over its material's)",
             },
             helio_core::DebugViewDescriptor {
                 name: "Radiance Cache",
@@ -1092,6 +1284,11 @@ mod shader_tests {
             "gi_resolve",
             include_str!("../shaders/gi_resolve.wgsl"),
             &RESOLVE_SNIPPETS,
+        );
+        validate(
+            "gi_gather",
+            include_str!("../shaders/gi_gather.wgsl"),
+            &gather::SNIPPETS,
         );
     }
 }
