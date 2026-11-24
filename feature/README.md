@@ -243,7 +243,12 @@ reflections). GI publishes it (`cache.rs`, `gi_cache.wgsl`):
 - **Keys** (the contract's): the world cell of the hit (64-bit counts an
   axis), its level (cells 2^-6 to 2^10 m: one a surface point, the eye
   angle's at its distance, whoever reads it), the dominant side of the
-  hit's face turned toward the ray, the ray's coordinate space. Hashed into
+  hit's face turned toward the ray, the ray's coordinate space. A cell is a
+  slab on its surface: the level's width across its side, an eighth of
+  that along the side's axis (its layer), so relief thinner than a layer is
+  its surface and a parallel surface farther off is another cell of the
+  same level (rough ground claims a cell a layer its relief spans, never
+  finer cells). Hashed into
   buckets of 16 slots (a key in its bucket or, where that was full, the
   next); a slot is its key's checksum and the frame it was last marked. A cell first marked takes the marking hit's point and normal
   and a place in the new cells' queue (after the slots: a quarter of them
@@ -259,13 +264,13 @@ reflections). GI publishes it (`cache.rs`, `gi_cache.wgsl`):
   plane of the face met crosses the cell's surface; a ceiling far above
   does not; a way no ray explored yet holds a 32nd of the cell; a way an
   update's ray finds clear grows by 2^(1/2), one no ray explored keeps its
-  bound). A reader off the cell's surface (the frame's surface stops,
-  `frame_surface_stops`: another surface facing the same way within the
-  cell, a curve turned away), or further along it than that, reads the
-  finer cell whose light holds there (at most
+  bound). A reader on a surface turned away from the cell's (the frame's
+  surface stops, `frame_surface_stops`: a curve, a corner), or further
+  along it than that, reads the finer cell whose light holds there (at most
   3 levels finer), and a mark claims those finer cells: a cell wider than a
-  thin wall, a slab or the gap to a parallel wall beside it lights its own
-  side only. A read that finds nothing says why (`miss`).
+  thin wall or a slab beside it lights its own side only. A read that finds
+  nothing says why (`miss`). GI's readers that read and mark
+  (`gi_hit_cell`) call `radiance_cache_read_mark`, one find a level.
 - **The cells in use are a list** on the GPU (two halves, one current):
   what the last frame kept, then the queue the marks filled. Every pass
   walks it with indirect dispatches, so a frame's work follows the cells in
@@ -304,8 +309,10 @@ reflections). GI publishes it (`cache.rs`, `gi_cache.wgsl`):
 - **Statistics**: `radiance_cache.cells` (in use), `.new`, `.evicted`,
   `.lit`, `.settled`; and every reader's hits by how the cache answered the
   side its ray met, `gi.hits.<reader>.<state>` (readers `probes`, `cache`,
-  `pixels`; states `cache`, `absent`, `new`, `unexplored`, `occluded`,
-  and `far_own`: a far side lit by the reader's own light sample).
+  `pixels`; states `cache`, `absent` (a key the full table turned away),
+  `new` (no value yet, a cell the hit's own mark claimed included),
+  `unexplored`, `occluded`, and `far_own`: a far side lit by the reader's
+  own light sample).
 - **Settings** (`GiSettings`, host group `gi`): `radiance_cache_slots`
   (2^12 to 2^24, default 2^18: about 162 bytes a slot, 40.5 MiB),
   `radiance_cache_rays` (the most a frame, default 32,768) and

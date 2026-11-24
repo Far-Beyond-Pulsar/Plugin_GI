@@ -44,26 +44,30 @@ struct GiHitCell {
     found: bool,
     waiting: bool,
     miss: u32,
+    // The read went to a cell finer than the surface's level (past an
+    // occluder the surface's cell met, a surface turned away from it).
+    finer: bool,
+    // The read's mark claimed a new cell.
+    claimed: bool,
 }
 
 // The cache at eye-relative hit `at` on the side of unit `side` (normal `n`)
-// in space `space` (`radiance_cache_read`), marking its cell when `mark`.
+// in space `space`: read and marked with one find a level
+// (`radiance_cache_read_mark`) when `mark`, read alone otherwise.
 fn gi_hit_cell(at: vec3<f32>, side: vec3<f32>, n: vec3<f32>, space: u32, mark: bool) -> GiHitCell {
     let p = at + gi_trace.eye.xyz;
-    let c = radiance_cache_read(p, side, space);
-    if mark { radiance_cache_mark(p, side, space); }
-    if c.found { return GiHitCell(c.direct / PI, c.indirect / PI, true, false, RADIANCE_CACHE_MISS_NONE); }
-    if c.miss == RADIANCE_CACHE_MISS_UNEXPLORED { return GiHitCell(vec3<f32>(0.0), c.indirect / PI, false, false, c.miss); }
-    if radiance_cache_miss_stays(c.miss) { return GiHitCell(vec3<f32>(0.0), vec3<f32>(0.0), false, false, c.miss); }
-    // Waiting: the surface's cell is in the cache (this mark's claim, or an
-    // earlier one) and has no value yet. A key the hash turned away (both
-    // buckets full, the new cells' queue full) waits on nothing.
-    var waiting = false;
-    if radiance_cache_present() {
-        let s = radiance_cache_find(radiance_cache_key(p, side, radiance_cache_level(p), space));
-        waiting = s != RADIANCE_CACHE_NONE && !radiance_cache_has_value(radiance_cache_entries[s]);
-    }
-    return GiHitCell(vec3<f32>(0.0), gi_irradiance(at, n).rgb, false, waiting, c.miss);
+    var c: RadianceCacheIrradiance;
+    if mark { c = radiance_cache_read_mark(p, side, space); } else { c = radiance_cache_read(p, side, space); }
+    let finer = radiance_cache_present() && c.level < radiance_cache_level(p);
+    if c.found { return GiHitCell(c.direct / PI, c.indirect / PI, true, false, RADIANCE_CACHE_MISS_NONE, finer, false); }
+    if c.miss == RADIANCE_CACHE_MISS_UNEXPLORED { return GiHitCell(vec3<f32>(0.0), c.indirect / PI, false, false, c.miss, finer, false); }
+    if radiance_cache_miss_stays(c.miss) { return GiHitCell(vec3<f32>(0.0), vec3<f32>(0.0), false, false, c.miss, finer, false); }
+    // Waiting: the cell the read went to is in the cache (this mark's claim,
+    // or an earlier one) and has no value yet. A key the hash turned away
+    // (both buckets full, the new cells' queue full: ABSENT) waits on
+    // nothing.
+    let waiting = c.miss == RADIANCE_CACHE_MISS_NEW;
+    return GiHitCell(vec3<f32>(0.0), gi_irradiance(at, n).rgb, false, waiting, c.miss, finer, c.claimed);
 }
 
 // The sides of a hit (`GiHitLight::own`, `gi_hit_direct`): the one its ray
@@ -84,8 +88,10 @@ struct GiHitLight {
     answered: bool,
     waiting: bool,
     own: u32,
-    // The near side's `GiHitCell::miss`.
+    // The near side's `GiHitCell::miss`, `finer` and `claimed`.
     miss: u32,
+    finer: bool,
+    claimed: bool,
 }
 
 // The light a hit at eye-relative `at` sends back along its ray's unit
@@ -109,7 +115,7 @@ fn gi_hit_light(at: vec3<f32>, dir: vec3<f32>, surface: SceneSurface, space: u32
     let through = surface_transmission(s);
     let front = gi_hit_cell(at, side, s.normal, space, mark);
     let dark = all(s.albedo.rgb == vec3<f32>(0.0));
-    var lit = GiHitLight(vec3<f32>(0.0), s.emissive, front.found || dark, front.waiting && !dark, 0u, front.miss);
+    var lit = GiHitLight(vec3<f32>(0.0), s.emissive, front.found || dark, front.waiting && !dark, 0u, front.miss, front.finer, front.claimed);
     if !dark {
         lit.reflected = s.albedo.rgb * (front.indirect + select(vec3<f32>(0.0), front.direct, !indirect_only));
         if own_light && !front.found { lit.own |= GI_SIDE_NEAR; }
@@ -175,9 +181,15 @@ fn gi_hit_direct(surface: SceneSurface, sample: LightSample, sides: u32) -> GiHi
 // The frame statistics of a reader's hits (`gi.hits.<reader>.<state>`,
 // `crate::hit_stats`): the near side's RADIANCE_CACHE_MISS_* (0 lit by the
 // cache), then GI_HIT_FAR_OWN (a far side lit by the reader's own light
-// sample).
-const GI_HIT_STATES: u32 = 6u;
+// sample), GI_HIT_FINER (the near side's read went finer than its
+// surface's level), GI_HIT_CLAIMED (its mark claimed a new cell: the
+// readers' share of the cache's new cells) and GI_HIT_CLAIMED_FINER (a new
+// cell finer than the surface's level).
+const GI_HIT_STATES: u32 = 9u;
 const GI_HIT_FAR_OWN: u32 = 5u;
+const GI_HIT_FINER: u32 = 6u;
+const GI_HIT_CLAIMED: u32 = 7u;
+const GI_HIT_CLAIMED_FINER: u32 = 8u;
 
 // A shadow ray from frame point `p` (already off its surface) toward a light
 // sample: `distance` away (a directional light: as far as GI's rays reach),
