@@ -149,7 +149,7 @@ const REUSE: u32 = 2;
 const TAGS: u32 = 4;
 
 /// The snippets `gi_gather.wgsl` is built with.
-pub(crate) const SNIPPETS: [helio_core::shader::ShaderSnippet; 14] = [
+pub(crate) const SNIPPETS: [helio_core::shader::ShaderSnippet; 15] = [
     SKY_SNIPPET,
     SKY_RADIANCE_SNIPPET,
     stream::SNIPPET,
@@ -159,6 +159,7 @@ pub(crate) const SNIPPETS: [helio_core::shader::ShaderSnippet; 14] = [
     light_samples::SNIPPET,
     radiance_cache::SNIPPET,
     history::SNIPPET,
+    history::SURFACE_STOPS_SNIPPET,
     denoise::IRRADIANCE_SNIPPET,
     GI_COMMON_SNIPPET,
     GI_SAMPLE_SNIPPET,

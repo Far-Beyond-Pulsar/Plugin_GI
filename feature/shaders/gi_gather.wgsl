@@ -8,6 +8,7 @@
 //!use frame_light_samples
 //!use frame_radiance_cache
 //!use frame_history
+//!use frame_surface_stops
 //!use frame_denoise_irradiance
 //!use gi_common
 //!use gi_sample
@@ -603,14 +604,9 @@ fn toward(x: vec3<f32>, r: Res) -> vec3<f32> {
 
 // Whether a reservoir received at `q` (normal `nq`) serves a receiver at `x`
 // (normal `n`, a pixel `footprint` wide there) whose samples are within
-// `reach`: the denoiser's stops (`helio-pass-denoise`'s geometry weight), a
-// normal within 41 degrees (a share of 1/8 of the cosine-weighted
-// hemisphere unseen) and a point within 0.378 of the separation off the
-// tangent plane (the chord of a surface turning by that much), plus a
-// pixel's footprint.
+// `reach`: the frame's surface stops, the denoiser's (`surface_stops_weight`).
 fn same_surface(x: vec3<f32>, n: vec3<f32>, q: vec3<f32>, nq: vec3<f32>, footprint: f32, reach: f32) -> bool {
-    let d = distance(x, q);
-    return d <= reach && dot(n, nq) >= 0.75 && abs(dot(n, q - x)) <= 0.378 * d + footprint;
+    return distance(x, q) <= reach && surface_stops_weight(x, n, q, nq, footprint) > 0.0;
 }
 
 // The internal pixel frame point `x` projects to this frame.
@@ -620,27 +616,16 @@ fn screen_pixel(x: vec3<f32>) -> vec2<i32> {
     return clamp(vec2<i32>(floor(uv * vec2<f32>(internal_size()))), vec2<i32>(0), vec2<i32>(internal_size()) - 1);
 }
 
-// Whether the depth buffer shows nothing between receivers `xa` (at internal
-// pixel `a`) and `xb` (at `b`): along the screen's segment between them, no
-// surface nearer the eye than the straight line between the two points by
-// more than a quarter of their separation and two pixels' footprint. A
-// neighbour on the same plane across an occluder (a floor's two sides of a
-// wall) fails: its samples are what the occluder hides from this receiver,
-// which the resampling's weights (geometry terms, no visibility) do not see.
-fn seen_between(a: vec2<i32>, b: vec2<i32>, xa: vec3<f32>, xb: vec3<f32>) -> bool {
-    let d = b - a;
-    let steps = max(abs(d.x), abs(d.y));
-    let tolerance = 0.25 * distance(xa, xb);
-    for (var k = 1; k < steps; k++) {
-        let u = f32(k) / f32(steps);
-        let q = a + vec2<i32>(round(vec2<f32>(d) * u));
-        let o = position_at(q);
-        if o.w == 0.0 { continue; }
-        let line = mix(xa, xb, u);
-        let nearer = dot(line - o.xyz, gather.forward.xyz);
-        if nearer > tolerance + 2.0 * footprint_at(line) { return false; }
-    }
-    return true;
+// The frame point at internal pixel `q` and a pixel's footprint there (0:
+// the sky), as the surface stops' walk reads the depth buffer
+// (`surface_stops_seen`: a neighbour on the same plane across an occluder, a
+// floor's two sides of a wall, is not taken; its samples are what the
+// occluder hides from this receiver, which the resampling's weights,
+// geometry terms with no visibility, do not see).
+fn surface_stops_point(q: vec2<i32>) -> vec4<f32> {
+    let o = position_at(q);
+    if o.w == 0.0 { return vec4<f32>(0.0); }
+    return vec4<f32>(o.xyz, footprint_at(o.xyz));
 }
 
 // How far from its receiver a reservoir's receiver may be and still be the
@@ -935,7 +920,7 @@ fn gather_temporal(@builtin(global_invocation_id) id: vec3<u32>) {
                 // rejection, which leaves a temporal sample traced from the
                 // same surface; its validity over time is the re-trace's).
                 if r.valid && r.m > 0.0 && same_surface(x, n, r.receiver, r.normal, footprint, block_reach(footprint))
-                    && seen_between(vec2<i32>(p), screen_pixel(r.receiver), x, r.receiver) {
+                    && surface_stops_seen(vec2<i32>(p), screen_pixel(r.receiver), x, n, r.receiver, r.normal) {
                     prev = r;
                     prev.m = min(prev.m, gather.reuse.x);
                     texels[i].z = texels[j].y;
@@ -1027,7 +1012,7 @@ fn gather_spatial(@builtin(global_invocation_id) id: vec3<u32>) {
             let r = res_unpack(reservoirs[u32(q.y) * traced.x + u32(q.x)], gather.eye.xyz);
             if !r.valid || r.m <= 0.0 { continue; }
             if !same_surface(x, n, r.receiver, r.normal, footprint, reach) { continue; }
-            if !seen_between(vec2<i32>(traced_pixel(id.xy)), vec2<i32>(traced_pixel(vec2<u32>(q))), x, r.receiver) { continue; }
+            if !surface_stops_seen(vec2<i32>(traced_pixel(id.xy)), vec2<i32>(traced_pixel(vec2<u32>(q))), x, n, r.receiver, r.normal) { continue; }
             domains[count] = r;
             count += 1u;
         }
