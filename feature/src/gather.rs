@@ -12,9 +12,9 @@
 //! block's footprint, the horizon over the depth buffer), each traced texel's
 //! ray into the stream [`pixel_stream`], and one reservoir in
 //! [`RETRACE_PERIOD`] re-traced along its kept sample. The tracers answer;
-//! [`GiGatherHitsPass`]: each hit's light, from the cache where its cell is
-//! no wider than the ray is long, otherwise the cell's indirect part and a
-//! light query (the light batch `gi_pixels`) for the hit's own direct light.
+//! [`GiGatherHitsPass`]: each hit's light from the cache, and where the
+//! cache has none a light query (the light batch `gi_pixels`) for the hit's
+//! own direct light.
 //! The samplers answer; [`GiGatherShadowPass`]: the samples' shadow rays
 //! (`gi_pixels_shadow`). The tracers answer; [`GiGatherShadePass`]: the
 //! re-traced samples' light now (a change lowers the confidence the
@@ -839,9 +839,8 @@ fn grow(device: &wgpu::Device, slot: &mut Option<(wgpu::Buffer, u64)>, label: &s
     }
 }
 
-/// Each texel's hit lit: from the cache where its cell is no wider than the
-/// ray is long, and otherwise the cell's indirect part and a light query for
-/// the hit's own direct light (module docs, `gather_hits`).
+/// Each texel's hit lit: from the cache, and where it has no light a light
+/// query for the hit's own direct light (module docs, `gather_hits`).
 pub struct GiGatherHitsPass {
     signal: Signal,
     stream: Stream,
@@ -867,7 +866,6 @@ const PIXEL_HIT_STATS: [&str; crate::HIT_STATES.len()] = [
     "PIXEL_HIT_STAT_3",
     "PIXEL_HIT_STAT_4",
     "PIXEL_HIT_STAT_5",
-    "PIXEL_HIT_STAT_6",
 ];
 
 impl GiGatherHitsPass {

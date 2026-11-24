@@ -215,13 +215,12 @@ fn rotation(seed: u64) -> [f32; 4] {
 /// met (`cache`: it had light; otherwise the contract's
 /// `RADIANCE_CACHE_MISS_*`), then the hits whose far side took the reader's
 /// own light sample (`far_own`).
-pub const HIT_STATES: [&str; 7] = [
+pub const HIT_STATES: [&str; 6] = [
     "cache",
     "absent",
     "new",
     "unexplored",
     "occluded",
-    "reach",
     "far_own",
 ];
 

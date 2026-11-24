@@ -51,7 +51,7 @@ const PI: f32 = 3.14159265;
 // irradiance / pi, weight 0 where no cell holds a value; darker toward its
 // cell's edges (along the two axes across its side).
 fn cache_view(p: vec3<f32>, n: vec3<f32>) -> vec4<f32> {
-    let c = radiance_cache_read(p, n, cameras[0].view_info.w, RADIANCE_CACHE_FAR);
+    let c = radiance_cache_read(p, n, cameras[0].view_info.w);
     if !c.found { return vec4<f32>(0.0); }
     let q = radiance_cache_cells(p, c.level);
     let f = abs(q - floor(q) - 0.5);

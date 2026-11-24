@@ -34,10 +34,8 @@
 //   pixel's normal) into the stream `gi_pixels`, and for one reservoir in
 //   GATHER period, a ray re-tracing its kept sample.
 // - `gather_hits` (a texel): its ray's hit lit as GI lights a hit
-//   (`gi_hit_light`), the ray's length its reach (a cell's light gathered
-//   farther from the hit than that is light the hit does not see from where
-//   it is: the floor beyond a contact, the lit side of a thin wall); a side
-//   the cache has no light for takes the probes' irradiance and a light
+//   (`gi_hit_light`: the cell's prefiltered light, as the probes' hits take
+//   it); a side the cache has no light for is lit on the spot, a light
 //   query for its own direct light (`gi_pixels` light batch).
 // - `gather_shadow` (a query): its light sample's light at the hit, waiting
 //   on a shadow ray (`gi_pixels_shadow`).
@@ -217,7 +215,6 @@ override PIXEL_HIT_STAT_2: u32 = 0u;
 override PIXEL_HIT_STAT_3: u32 = 0u;
 override PIXEL_HIT_STAT_4: u32 = 0u;
 override PIXEL_HIT_STAT_5: u32 = 0u;
-override PIXEL_HIT_STAT_6: u32 = 0u;
 
 fn pixel_hit_stat(k: u32) -> u32 {
     switch k {
@@ -226,8 +223,7 @@ fn pixel_hit_stat(k: u32) -> u32 {
         case 2u: { return PIXEL_HIT_STAT_2; }
         case 3u: { return PIXEL_HIT_STAT_3; }
         case 4u: { return PIXEL_HIT_STAT_4; }
-        case 5u: { return PIXEL_HIT_STAT_5; }
-        default: { return PIXEL_HIT_STAT_6; }
+        default: { return PIXEL_HIT_STAT_5; }
     }
 }
 
@@ -660,7 +656,7 @@ fn block_reach(footprint: f32) -> f32 {
 // read without claiming it, as a reader in the air: a light that changed
 // shows wherever the cell holds), what a re-trace compares; 0 where none.
 fn cache_luminance(point: vec3<f32>, side: vec3<f32>, surface: SceneSurface, space: u32) -> f32 {
-    let c = radiance_cache_read(point, side, space, RADIANCE_CACHE_FAR);
+    let c = radiance_cache_read(point, side, space);
     if !c.found { return 0.0; }
     let s = scene_surface_unpack(surface);
     return luminance(s.albedo.rgb * (c.direct + c.indirect) / PI + s.emissive);
@@ -723,7 +719,7 @@ fn gather_hits(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invo
             let surface = surfaces[i];
             let footprint = scene_ray_footprint(ray, m.t);
             let space = scene_ray_space(ray);
-            let lit = gi_hit_light(m.point - eye, ray.dir, surface, space, m.t, false, true, true);
+            let lit = gi_hit_light(m.point - eye, ray.dir, surface, space, false, true, true);
             atomicAdd(&w_states[lit.miss], 1u);
             if (lit.own & GI_SIDE_FAR) != 0u { atomicAdd(&w_states[GI_HIT_FAR_OWN], 1u); }
             light.rest = scene_pack_radiance(lit.reflected + lit.emitted);

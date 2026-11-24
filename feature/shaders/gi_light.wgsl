@@ -78,14 +78,12 @@ override PROBE_HIT_STAT_2: u32 = 0u;
 override PROBE_HIT_STAT_3: u32 = 0u;
 override PROBE_HIT_STAT_4: u32 = 0u;
 override PROBE_HIT_STAT_5: u32 = 0u;
-override PROBE_HIT_STAT_6: u32 = 0u;
 override CACHE_HIT_STAT_0: u32 = 0u;
 override CACHE_HIT_STAT_1: u32 = 0u;
 override CACHE_HIT_STAT_2: u32 = 0u;
 override CACHE_HIT_STAT_3: u32 = 0u;
 override CACHE_HIT_STAT_4: u32 = 0u;
 override CACHE_HIT_STAT_5: u32 = 0u;
-override CACHE_HIT_STAT_6: u32 = 0u;
 
 fn hit_stat(probe: bool, k: u32) -> u32 {
     switch k {
@@ -94,8 +92,7 @@ fn hit_stat(probe: bool, k: u32) -> u32 {
         case 2u: { return select(CACHE_HIT_STAT_2, PROBE_HIT_STAT_2, probe); }
         case 3u: { return select(CACHE_HIT_STAT_3, PROBE_HIT_STAT_3, probe); }
         case 4u: { return select(CACHE_HIT_STAT_4, PROBE_HIT_STAT_4, probe); }
-        case 5u: { return select(CACHE_HIT_STAT_5, PROBE_HIT_STAT_5, probe); }
-        default: { return select(CACHE_HIT_STAT_6, PROBE_HIT_STAT_6, probe); }
+        default: { return select(CACHE_HIT_STAT_5, PROBE_HIT_STAT_5, probe); }
     }
 }
 
@@ -191,15 +188,7 @@ fn gi_light(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
                 let n = s.normal;
                 let footprint = width + spread * hit.t;
                 let through = surface_transmission(s);
-                // The reach (`radiance_cache_read`): any. A probe is in the
-                // air; a cache ray's hit's cell is the bounced part's, a
-                // bounce on from the cell's own rays, whose error a cell's
-                // point a little past the ray's length moves by a second
-                // order (as SHaRC's and GI-1.0's secondary hits read their
-                // grids), where keeping finer cells at every contact the
-                // cache's rays meet would multiply its working set.
-                let reach = RADIANCE_CACHE_FAR;
-                let lit = gi_hit_light(at, dir, surface, space, reach, !probe, probe, true);
+                let lit = gi_hit_light(at, dir, surface, space, !probe, probe, true);
                 atomicAdd(&w_states[lit.miss], 1u);
                 if (lit.own & GI_SIDE_FAR) != 0u { atomicAdd(&w_states[GI_HIT_FAR_OWN], 1u); }
                 bounced = lit.reflected;
