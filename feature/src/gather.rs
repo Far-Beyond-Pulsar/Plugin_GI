@@ -149,7 +149,7 @@ const REUSE: u32 = 2;
 const TAGS: u32 = 4;
 
 /// The snippets `gi_gather.wgsl` is built with.
-pub(crate) const SNIPPETS: [helio_core::shader::ShaderSnippet; 15] = [
+pub(crate) const SNIPPETS: [helio_core::shader::ShaderSnippet; 16] = [
     SKY_SNIPPET,
     SKY_RADIANCE_SNIPPET,
     stream::SNIPPET,
@@ -160,6 +160,7 @@ pub(crate) const SNIPPETS: [helio_core::shader::ShaderSnippet; 15] = [
     radiance_cache::SNIPPET,
     history::SNIPPET,
     history::SURFACE_STOPS_SNIPPET,
+    history::SURFACE_SEEN_SNIPPET,
     denoise::IRRADIANCE_SNIPPET,
     GI_COMMON_SNIPPET,
     GI_SAMPLE_SNIPPET,
@@ -852,10 +853,22 @@ pub struct GiGatherHitsPass {
     layout: wgpu::BindGroupLayout,
     hits: wgpu::ComputePipeline,
     header: wgpu::ComputePipeline,
+    stats: wgpu::Buffer,
     cache: helio_core::gpu_cache::GpuCache,
     reads: &'static [&'static str],
     writes: &'static [&'static str],
 }
+
+/// `gi_gather.wgsl`'s overrides of its hits' states.
+const PIXEL_HIT_STATS: [&str; crate::HIT_STATES.len()] = [
+    "PIXEL_HIT_STAT_0",
+    "PIXEL_HIT_STAT_1",
+    "PIXEL_HIT_STAT_2",
+    "PIXEL_HIT_STAT_3",
+    "PIXEL_HIT_STAT_4",
+    "PIXEL_HIT_STAT_5",
+    "PIXEL_HIT_STAT_6",
+];
 
 impl GiGatherHitsPass {
     fn new(
@@ -864,6 +877,7 @@ impl GiGatherHitsPass {
         stream: Stream,
         batch: LightBatch,
         answer: AnswerWord,
+        stats: &helio_core::FrameStats,
     ) -> Self {
         let mut entries = vec![
             uniform(0, GATHER_FRAME_BYTES),
@@ -874,17 +888,26 @@ impl GiGatherHitsPass {
             storage(27, false),
             storage(28, false),
             storage(30, false),
+            storage(38, false),
         ];
         entries.extend(HitLighting::entries());
         let layout = layout(device, "GI gather hits", &entries);
         let module = module(device);
         let pipeline_layout = crate::pipeline_layout(device, "GI gather hits", &layout);
+        let constants = crate::hit_stats(stats, "pixels", &PIXEL_HIT_STATS);
         let mut reads = vec![GATHER_FRAME, stream.rays, stream.hits];
         reads.extend(stream.surfaces);
         reads.extend(HitLighting::READS);
         Self {
-            hits: compute(device, &module, &pipeline_layout, "gather_hits", &[]),
-            header: compute(device, &module, &pipeline_layout, "gather_hits_header", &[]),
+            hits: compute(device, &module, &pipeline_layout, "gather_hits", &constants),
+            header: compute(
+                device,
+                &module,
+                &pipeline_layout,
+                "gather_hits_header",
+                &constants,
+            ),
+            stats: stats.buffer().clone(),
             layout,
             lights: None,
             hit_light: None,
@@ -963,6 +986,7 @@ impl RenderPass for GiGatherHitsPass {
             entry(27, &lights.header),
             entry(28, &lights.queries),
             entry(30, hit_light),
+            entry(38, &self.stats),
         ];
         entries.extend(lit);
         self.cache.end_frame();
@@ -1637,6 +1661,7 @@ pub(crate) fn build(
         stream,
         batch,
         pixels_word,
+        &stats,
     )));
     light_samples::sample(build, &batch)?;
     build.graph.add_pass(Box::new(GiGatherShadowPass::new(

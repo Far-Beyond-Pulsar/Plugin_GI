@@ -90,11 +90,14 @@ phase, and holds the whole update:
    of leaves it is the voxel's inside, where a cell seated there would start
    every ray in a solid):
    - a probe's ray: `base * cache irradiance / pi + emission`, the cache's
-     direct and indirect parts both. A side the cache has no light for (its
-     cell new, its rays not yet past the way to the hit, an occluder between
-     with no finer cell that holds) is lit on the spot: the probes'
-     irradiance there for its indirect light (DDGI's recursion) and a light
-     query of its own for its direct light. A two-sided surface's far side:
+     direct and indirect parts both. A side the cache has no light for is
+     lit on the spot: a light query of its own for its direct light, and for
+     its indirect light, by why the read found nothing (the contract's
+     `miss`): the cell's own where its rays have not explored the way to the
+     hit yet; the probes' irradiance (DDGI's recursion) where the cell is
+     new or not claimed yet; none where every cell that could answer holds
+     its light past an occluder (the probes see a thin wall's, a sheet's, a
+     contact's point from both sides, so they cannot stand in there). A two-sided surface's far side:
      the cache's indirect part where it has one (nothing of the probes',
      which at a point on a thin surface hold the near side's light too), and
      its direct light always from the probe's own light sample through the
@@ -250,12 +253,16 @@ reflections). GI publishes it (`cache.rs`, `gi_cache.wgsl`):
   way, in 8 directions (from the rays that went low, below 45 degrees over
   the surface: a wall standing there bounds a way, at the line where the
   plane of the face met crosses the cell's surface; a ceiling far above
-  does not; a way no ray explored yet holds a 32nd of the cell). A read
-  whose point is further than that, or than its reader's reach (a pixel's
-  ray its length: the surface it left is in the hit's way there), reads the
-  finer cell whose light holds there (at most 3 levels finer), and a mark
-  claims those finer cells: a cell wider than a thin wall or slab beside it
-  lights its own side only.
+  does not; a way no ray explored yet holds a 32nd of the cell; a way an
+  update's ray finds clear grows by 2^(1/2), one no ray explored keeps its
+  bound). A reader off the cell's surface (the frame's surface stops,
+  `frame_surface_stops`: another surface facing the same way within the
+  cell, a curve turned away), or further along it than that, or than its
+  reader's reach (a pixel's ray its length: the surface it left is in the
+  hit's way there), reads the finer cell whose light holds there (at most
+  3 levels finer), and a mark claims those finer cells: a cell wider than a
+  thin wall, a slab or the gap to a parallel wall beside it lights its own
+  side only. A read that finds nothing says why (`miss`).
 - **The cells in use are a list** on the GPU (two halves, one current):
   what the last frame kept, then the queue the marks filled. Every pass
   walks it with indirect dispatches, so a frame's work follows the cells in
@@ -288,6 +295,11 @@ reflections). GI publishes it (`cache.rs`, `gi_cache.wgsl`):
   standard deviations and 1% apart; the bounced part has its own) restarts a part at its next update. A
   ray that started inside a solid (the cell's point behind a corner's other
   surface) is left out of the update.
+- **Statistics**: `radiance_cache.cells` (in use), `.new`, `.evicted`,
+  `.lit`, `.settled`; and every reader's hits by how the cache answered the
+  side its ray met, `gi.hits.<reader>.<state>` (readers `probes`, `cache`,
+  `pixels`; states `cache`, `absent`, `new`, `unexplored`, `occluded`,
+  `reach`, and `far_own`: a far side lit by the reader's own light sample).
 - **Settings** (`GiSettings`, host group `gi`): `radiance_cache_slots`
   (2^12 to 2^24, default 2^18: about 162 bytes a slot, 40.5 MiB) and
   `radiance_cache_rays` (the most a frame, default 32,768). Where each

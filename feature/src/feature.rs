@@ -147,7 +147,7 @@ fn build_update(build: &mut NodeBuild<'_, '_>) -> Result<(), String> {
     stream::trace(build, &rays)?;
     build
         .graph
-        .add_pass(Box::new(GiLightPass::new(&device, &config)));
+        .add_pass(Box::new(GiLightPass::new(&device, &config, &stats)));
     light_samples::sample(build, &crate::light_batch(&config.cache))?;
     build.graph.add_pass(Box::new(GiShadowPass::new(
         &device,

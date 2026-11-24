@@ -123,9 +123,10 @@ const TRACE_BYTES: u64 = std::mem::size_of::<GpuTrace>() as u64;
 const PENDING_BYTES: u64 = 16;
 
 /// The snippets `gi_resolve.wgsl` is built with.
-const RESOLVE_SNIPPETS: [helio_core::shader::ShaderSnippet; 5] = [
+const RESOLVE_SNIPPETS: [helio_core::shader::ShaderSnippet; 6] = [
     stream::SNIPPET,
     radiance_cache::SNIPPET,
+    helio_frame_api::history::SURFACE_STOPS_SNIPPET,
     GI_COMMON_SNIPPET,
     GI_SAMPLE_SNIPPET,
     helio_frame_api::denoise::IRRADIANCE_SNIPPET,
@@ -207,6 +208,40 @@ fn rotation(seed: u64) -> [f32; 4] {
         (b * (tau * u3).sin()) as f32,
         (b * (tau * u3).cos()) as f32,
     ]
+}
+
+/// The states a reader's hits are counted in (`gi.hits.<reader>.<state>`,
+/// `gi_hit.wgsl`'s GI_HIT_STATES): how the cache answered the side its ray
+/// met (`cache`: it had light; otherwise the contract's
+/// `RADIANCE_CACHE_MISS_*`), then the hits whose far side took the reader's
+/// own light sample (`far_own`).
+pub const HIT_STATES: [&str; 7] = [
+    "cache",
+    "absent",
+    "new",
+    "unexplored",
+    "occluded",
+    "reach",
+    "far_own",
+];
+
+/// A shader's hit-state overrides `overrides` (in [`HIT_STATES`]' order) as
+/// pipeline constants: the slots of `gi.hits.<reader>.<state>`.
+fn hit_stats<'n>(
+    stats: &helio_core::FrameStats,
+    reader: &str,
+    overrides: &[&'n str; HIT_STATES.len()],
+) -> Vec<(&'n str, f64)> {
+    let names: Vec<String> = HIT_STATES
+        .iter()
+        .map(|state| format!("gi.hits.{reader}.{state}"))
+        .collect();
+    let pairs: Vec<(&str, &str)> = overrides
+        .iter()
+        .zip(&names)
+        .map(|(o, n)| (*o, n.as_str()))
+        .collect();
+    stats.slot_constants(&pairs)
 }
 
 fn storage(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {

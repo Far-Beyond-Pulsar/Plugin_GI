@@ -570,6 +570,7 @@ pub type CacheQueries = Arc<Mutex<(Vec<CacheQuery>, bool)>>;
 
 const READER: &str = r#"//!use frame_ray_stream
 //!use frame_radiance_cache
+//!use frame_surface_stops
 struct Query {
     p: vec4<f32>,
     n: vec4<f32>,
@@ -655,7 +656,11 @@ impl CacheReader {
             device,
             "cache reader",
             READER,
-            &[stream::SNIPPET, radiance_cache::SNIPPET],
+            &[
+                stream::SNIPPET,
+                radiance_cache::SNIPPET,
+                helio_frame_api::history::SURFACE_STOPS_SNIPPET,
+            ],
         );
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("cache reader"),
@@ -1219,6 +1224,22 @@ impl Harness {
 
     /// Renders a frame and returns its statistics, its GPU counters read
     /// back.
+    /// DIAG: prints the hit states of one frame.
+    pub fn print_hits(&mut self, what: &str) {
+        let s = self.frame_stats();
+        let mut v: Vec<(String, u64)> = s
+            .iter()
+            .filter(|(n, _)| {
+                n.starts_with("gi.hits")
+                    || n.starts_with("rays.")
+                    || n.starts_with("radiance_cache")
+            })
+            .map(|(n, v)| (n.to_string(), v))
+            .collect();
+        v.sort();
+        println!("DIAG {what}: {v:?}");
+    }
+
     pub fn frame_stats(&mut self) -> Arc<helio_core::StatsSnapshot> {
         let gpu = self.gpu;
         let cycle = |stats: &helio_core::FrameStats| {

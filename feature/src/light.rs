@@ -46,7 +46,7 @@ use crate::{
 };
 
 /// The snippets `gi_light.wgsl` is built with.
-pub(crate) const SNIPPETS: [helio_core::shader::ShaderSnippet; 12] = [
+pub(crate) const SNIPPETS: [helio_core::shader::ShaderSnippet; 13] = [
     SKY_SNIPPET,
     SKY_RADIANCE_SNIPPET,
     stream::SNIPPET,
@@ -55,6 +55,7 @@ pub(crate) const SNIPPETS: [helio_core::shader::ShaderSnippet; 12] = [
     helio_frame_api::gbuffer::BSDF_SNIPPET,
     light_samples::SNIPPET,
     radiance_cache::SNIPPET,
+    helio_frame_api::history::SURFACE_STOPS_SNIPPET,
     GI_COMMON_SNIPPET,
     GI_SAMPLE_SNIPPET,
     GI_RAYS_SNIPPET,
@@ -69,6 +70,26 @@ fn module(device: &wgpu::Device) -> wgpu::ShaderModule {
         &SNIPPETS,
     )
 }
+
+/// `gi_light.wgsl`'s overrides of its probes' and cache rays' hit states.
+const PROBE_HIT_STATS: [&str; crate::HIT_STATES.len()] = [
+    "PROBE_HIT_STAT_0",
+    "PROBE_HIT_STAT_1",
+    "PROBE_HIT_STAT_2",
+    "PROBE_HIT_STAT_3",
+    "PROBE_HIT_STAT_4",
+    "PROBE_HIT_STAT_5",
+    "PROBE_HIT_STAT_6",
+];
+const CACHE_HIT_STATS: [&str; crate::HIT_STATES.len()] = [
+    "CACHE_HIT_STAT_0",
+    "CACHE_HIT_STAT_1",
+    "CACHE_HIT_STAT_2",
+    "CACHE_HIT_STAT_3",
+    "CACHE_HIT_STAT_4",
+    "CACHE_HIT_STAT_5",
+    "CACHE_HIT_STAT_6",
+];
 
 /// The cache's bindings both passes declare (17..23 of `gi_light.wgsl`).
 fn cache_entries() -> [wgpu::BindGroupLayoutEntry; 7] {
@@ -92,6 +113,7 @@ pub struct GiLightPass {
     pending: wgpu::Buffer,
     cells: wgpu::Buffer,
     cache_cells: u32,
+    stats: wgpu::Buffer,
     layout: wgpu::BindGroupLayout,
     light: wgpu::ComputePipeline,
     header: wgpu::ComputePipeline,
@@ -104,7 +126,8 @@ pub struct GiLightPass {
 }
 
 impl GiLightPass {
-    pub fn new(device: &wgpu::Device, config: &GiConfig) -> Self {
+    /// The pass, counting its hits' states into `stats` ([`crate::hit_stats`]).
+    pub fn new(device: &wgpu::Device, config: &GiConfig, stats: &helio_core::FrameStats) -> Self {
         let mut entries = vec![
             uniform(0, FRAME_BYTES),
             storage(1, true),
@@ -117,6 +140,7 @@ impl GiLightPass {
             storage(12, false),
             storage(13, false),
             storage(14, false),
+            storage(16, false),
         ];
         entries.extend(crate::sky_radiance_layout(4, 24));
         entries.extend(cache_entries());
@@ -129,7 +153,9 @@ impl GiLightPass {
         let rays = crate::gi_stream(config);
         let batch = crate::light_batch(&config.cache);
         let uniform_usage = wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST;
-        let constants = [("CACHE_CELLS", f64::from(config.cache.cells()))];
+        let mut constants = vec![("CACHE_CELLS", f64::from(config.cache.cells()))];
+        constants.extend(crate::hit_stats(stats, "probes", &PROBE_HIT_STATS));
+        constants.extend(crate::hit_stats(stats, "cache", &CACHE_HIT_STATS));
         let mut reads = vec![
             GI_FRAME,
             GI_PROBES,
@@ -171,6 +197,7 @@ impl GiLightPass {
                 wgpu::BufferUsages::STORAGE,
             ),
             cache_cells: config.cache.cells(),
+            stats: stats.buffer().clone(),
             no_atmosphere: buffer(
                 device,
                 "GI light no atmosphere",
@@ -281,6 +308,7 @@ impl RenderPass for GiLightPass {
                     entry(12, answered),
                     entry(13, &self.lights.header),
                     entry(14, &self.lights.queries),
+                    entry(16, &self.stats),
                     entry(17, cache_frame),
                     entry(18, slots),
                     entry(19, entries),

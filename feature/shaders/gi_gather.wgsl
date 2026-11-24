@@ -9,6 +9,7 @@
 //!use frame_radiance_cache
 //!use frame_history
 //!use frame_surface_stops
+//!use frame_surface_seen
 //!use frame_denoise_irradiance
 //!use gi_common
 //!use gi_sample
@@ -209,6 +210,26 @@ const NEAR_SLICES: u32 = 4u;
 // The frame's statistics: the shadow stream's count (`rays.gi_pixels_shadow`).
 @group(0) @binding(38) var<storage, read_write> stats: array<atomic<u32>>;
 override GATHER_SHADOW_STAT: u32 = 0u;
+// The hits' states (`gi.hits.pixels.*`: GI_HIT_STATES).
+override PIXEL_HIT_STAT_0: u32 = 0u;
+override PIXEL_HIT_STAT_1: u32 = 0u;
+override PIXEL_HIT_STAT_2: u32 = 0u;
+override PIXEL_HIT_STAT_3: u32 = 0u;
+override PIXEL_HIT_STAT_4: u32 = 0u;
+override PIXEL_HIT_STAT_5: u32 = 0u;
+override PIXEL_HIT_STAT_6: u32 = 0u;
+
+fn pixel_hit_stat(k: u32) -> u32 {
+    switch k {
+        case 0u: { return PIXEL_HIT_STAT_0; }
+        case 1u: { return PIXEL_HIT_STAT_1; }
+        case 2u: { return PIXEL_HIT_STAT_2; }
+        case 3u: { return PIXEL_HIT_STAT_3; }
+        case 4u: { return PIXEL_HIT_STAT_4; }
+        case 5u: { return PIXEL_HIT_STAT_5; }
+        default: { return PIXEL_HIT_STAT_6; }
+    }
+}
 
 fn internal_size() -> vec2<u32> {
     return gather.size.xy;
@@ -675,12 +696,14 @@ fn met(row: u32) -> Met {
 
 var<workgroup> w_rows: atomic<u32>;
 var<workgroup> w_base: u32;
+var<workgroup> w_states: array<atomic<u32>, GI_HIT_STATES>;
 
 // A workgroup of 64 texels: each one's hit's light (module docs), its light
 // queries in one block of the batch.
 @compute @workgroup_size(64)
 fn gather_hits(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_index) li: u32) {
     if li == 0u { atomicStore(&w_rows, 0u); }
+    if li < GI_HIT_STATES { atomicStore(&w_states[li], 0u); }
     workgroupBarrier();
     let traced = traced_size();
     let n = traced.x * traced.y;
@@ -701,6 +724,8 @@ fn gather_hits(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invo
             let footprint = scene_ray_footprint(ray, m.t);
             let space = scene_ray_space(ray);
             let lit = gi_hit_light(m.point - eye, ray.dir, surface, space, m.t, false, true, true);
+            atomicAdd(&w_states[lit.miss], 1u);
+            if (lit.own & GI_SIDE_FAR) != 0u { atomicAdd(&w_states[GI_HIT_FAR_OWN], 1u); }
             light.rest = scene_pack_radiance(lit.reflected + lit.emitted);
             light.cache_y = cache_luminance(m.point, m.normal, surface, space);
             if lit.own != 0u {
@@ -721,6 +746,10 @@ fn gather_hits(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invo
     if li == 0u {
         let here = atomicLoad(&w_rows);
         w_base = select(0u, atomicAdd(&light_header[3], here), here > 0u);
+    }
+    if li < GI_HIT_STATES {
+        let k = atomicLoad(&w_states[li]);
+        if k > 0u { atomicAdd(&stats[pixel_hit_stat(li)], k); }
     }
     workgroupBarrier();
     if want {

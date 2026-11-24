@@ -67,8 +67,12 @@
 //!   (their luminance falls and is not clamped from below).
 //! - Clear distances ([`CLEAR_GROWTH`]): each cell keeps, along 8 ways over
 //!   its surface, how far its low rays (below 45 degrees) found nothing in
-//!   the way; a way not bounded again grows by `2^(1/8)` an update, twice in
-//!   8 updates (about four rays a way), so an opened way is found again.
+//!   the way; a way whose ray an update meets nothing nearer grows by
+//!   `2^(1/2)`, and one no ray explored keeps its bound. A way is explored
+//!   once in four updates, so an opened way's bound doubles in eight
+//!   updates, as before, but it no longer grows between explorations (a
+//!   bound three updates in four at 1.3 times its wall's distance let a 4 m
+//!   cell's readers up to a metre past a thin wall read the lit side).
 //! - [`EVICT_AGE`] (128 frames): twice the longest a reader of the cache
 //!   leaves between two reads of a cell it keeps reading (a probe of GI's
 //!   coarser levels is updated every 41 frames), so no cell a reader still
@@ -111,10 +115,10 @@ pub const BOUNCED: u32 = 16;
 const _: () = assert!(HISTORY_MAX <= 255 && BOUNCED <= HISTORY_MAX);
 /// The spread of a cell's ray: `sqrt(2 pi / (RAYS_PER_CELL * 2 * HISTORY_MIN))`.
 pub const SPREAD: f32 = 0.2216;
-/// How much a cell's clear distance along a way grows an update its rays
-/// meet nothing nearer that way: `2^(1 / 8)`, twice in eight updates, about
-/// four rays a way (module docs).
-pub const CLEAR_GROWTH: f32 = 1.0905;
+/// How much a cell's clear distance along a way grows an update its ray
+/// that way meets nothing nearer: `2^(1 / 2)`, twice in the two
+/// explorations eight updates give a way (module docs).
+pub const CLEAR_GROWTH: f32 = std::f32::consts::SQRT_2;
 /// Updates the change test's fast mean holds (module docs).
 pub const FAST: u32 = 4;
 /// The change test clamps an update's luminance at the fast mean plus this
@@ -211,10 +215,11 @@ impl CacheConfig {
 }
 
 /// The snippets `gi_cache.wgsl` is built with.
-pub(crate) const SNIPPETS: [helio_core::shader::ShaderSnippet; 7] = [
+pub(crate) const SNIPPETS: [helio_core::shader::ShaderSnippet; 8] = [
     stream::SNIPPET,
     stream::SURFACE_SNIPPET,
     radiance_cache::SNIPPET,
+    helio_frame_api::history::SURFACE_STOPS_SNIPPET,
     helio_frame_api::gbuffer::SURFACE_SNIPPET,
     helio_frame_api::gbuffer::BSDF_SNIPPET,
     GI_COMMON_SNIPPET,
@@ -737,9 +742,12 @@ mod tests {
         assert_eq!(DETECT, 2 * FAST);
         // A ray's share of the hemisphere over twice the least history.
         let spread = (2.0 * std::f32::consts::PI / (RAYS_PER_CELL * 2 * HISTORY_MIN) as f32).sqrt();
-        // Twice in as many updates as there are ways (four rays a way).
+        // Twice in as many updates as there are ways: two low rays an
+        // update over the ways, so two explorations of each.
         let ways = helio_frame_api::rays::radiance_cache::WAYS;
-        assert!((CLEAR_GROWTH.powi(ways as i32) - 2.0).abs() < 1e-3);
+        let low_rays = RAYS_PER_CELL / 2;
+        let explorations = low_rays * ways / ways;
+        assert!((CLEAR_GROWTH.powi(explorations as i32) - 2.0).abs() < 1e-3);
         // The least history measures the deviation the change test needs.
         assert_eq!(HISTORY_MIN, 2 * DETECT);
         assert!((spread - SPREAD).abs() < 1e-4, "{spread}");

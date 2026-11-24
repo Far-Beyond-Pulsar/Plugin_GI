@@ -1,6 +1,7 @@
 //!use helio_prelude
 //!use frame_ray_stream
 //!use frame_radiance_cache
+//!use frame_surface_stops
 //!use gi_common
 //!use gi_sample
 //!use frame_denoise_irradiance

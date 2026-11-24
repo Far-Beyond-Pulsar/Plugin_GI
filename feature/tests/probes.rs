@@ -265,20 +265,38 @@ fn the_sun_on_the_ground_lights_probes_from_below() {
     assert!(above.len() > 1000, "{} above", above.len());
 }
 
-/// The irradiance / pi facing down of the probe at world `at` (a probe of
-/// the finest level), once it has taken `updates` updates: its first may
-/// come while some cells its rays meet are new (those hits lit on the spot,
-/// their indirect light the probes' own, still empty); the updates after
-/// read the cells.
+/// The irradiance / pi facing down at world `at`: the mean of the 3x3
+/// probes of the finest level about it (one height), once each has taken
+/// `updates` updates. A probe's first update may come while some cells its
+/// rays meet are new (those hits lit on the spot); the updates after read
+/// the cells. One probe's few updates are a Monte Carlo estimate of 64 rays
+/// each: where a few percent of its view holds the light (the ground past a
+/// roof's edge), one probe's third update is that light within about 20% (a
+/// CPU model of the L1 projection over the roof's exact radiance: 0.0272,
+/// standard deviation 0.0055 at three updates), and nine of them read it
+/// within about 7%.
 fn down_at(h: &mut Harness, at: DVec3, updates: u32) -> Vec3 {
     let clipmap = h.clipmap();
-    let index = helio_pass_gi::Clipmap::index(0, (at / clipmap.finest).round().as_i64vec3());
-    let words = frames_until(h, "the probe updates", |words| {
-        probe(words, index, Vec3::NEG_Y).1 >> 8 >= updates
+    let f = clipmap.finest;
+    let indices: Vec<u32> = (-1i32..=1)
+        .flat_map(|dx| (-1i32..=1).map(move |dz| (dx, dz)))
+        .map(|(dx, dz)| {
+            let q = at + DVec3::new(f64::from(dx) * f, 0.0, f64::from(dz) * f);
+            helio_pass_gi::Clipmap::index(0, (q / f).round().as_i64vec3())
+        })
+        .collect();
+    let words = frames_until(h, "the probes update", |words| {
+        indices
+            .iter()
+            .all(|&i| probe(words, i, Vec3::NEG_Y).1 >> 8 >= updates)
     });
-    let (e, state) = probe(&words, index, Vec3::NEG_Y);
-    assert!(state & 1 == 1, "probe at {at}: {state:x}");
-    e
+    let mut sum = Vec3::ZERO;
+    for &i in &indices {
+        let (e, state) = probe(&words, i, Vec3::NEG_Y);
+        assert!(state & 1 == 1, "probe {i} near {at}: {state:x}");
+        sum += e;
+    }
+    sum / indices.len() as f32
 }
 
 /// The sun straight down on lit ground, and a black roof (12 m square, 3 m
@@ -308,6 +326,7 @@ fn a_roof_shadows_the_sun() {
         return;
     };
     let shaded = down_at(&mut covered, probe_at, 3);
+    println!("{shaded} under the roof, {lit} open");
     let below = HALF * 2.0 / PI;
     assert!(
         (lit - Vec3::splat(below)).abs().max_element() < 0.05 * below,

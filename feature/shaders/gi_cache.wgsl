@@ -1,6 +1,7 @@
 //!use frame_ray_stream
 //!use frame_ray_surface
 //!use frame_radiance_cache
+//!use frame_surface_stops
 //!use frame_surface
 //!use frame_bsdf
 //!use gi_common
@@ -101,9 +102,10 @@ const CACHE_FLOOR: f32 = 0.01;
 const CACHE_DETECT: u32 = 8u;
 // The spread of a cell's ray (`cache::SPREAD`).
 const CACHE_SPREAD: f32 = 0.2216;
-// How much a cell's clear distance grows an update its rays meet nothing
-// nearer that way (`cache::CLEAR_GROWTH`: twice in eight updates).
-const CACHE_CLEAR_GROWTH: f32 = 1.0905;
+// How much a cell's clear distance grows an update whose ray along that way
+// meets nothing nearer (`cache::CLEAR_GROWTH`: a way is explored once in four
+// updates, so an opened way's bound doubles in eight).
+const CACHE_CLEAR_GROWTH: f32 = 1.4142135;
 
 // `cache_plan`'s words: the histograms of need (0..32; 0: no light) and of
 // used age (32..64), then the plan.
@@ -567,11 +569,12 @@ fn cache_fold(@builtin(global_invocation_id) id: vec3<u32>) {
     if bounced_rays > 0u { bp = fold(bp, bounced, CACHE_BOUNCED); }
     let nb = bp.n;
     let b = bp.v;
-    // The clear distances: the nearest a ray of this update met along each
-    // way, or what the cell held grown by CACHE_CLEAR_GROWTH (a way that
-    // opened is found clear again within a few updates).
-    // A way explored this update takes its nearest bound (the nearer of it
-    // and what it held, grown); one not, what it held, grown; one never
+    // The clear distances. A way explored this update takes the nearer of
+    // its ray's bound and what it held grown by CACHE_CLEAR_GROWTH (a way
+    // that opened is found clear again within a few explorations); one not
+    // explored keeps what it held (it grew between explorations once: a
+    // bound 1.3 times its wall's distance three updates in four, and a
+    // reader that far past a thin wall read the lit side's cell); one never
     // explored stays unexplored (0: a reader's light holds there only near
     // the cell's point, `radiance_cache_holds`).
     var kept = array<f32, RADIANCE_CACHE_WAYS>();
@@ -579,7 +582,7 @@ fn cache_fold(@builtin(global_invocation_id) id: vec3<u32>) {
         let old = select(radiance_cache_clear(e, w), 0.0, fresh);
         let grown = min(old * CACHE_CLEAR_GROWTH, RADIANCE_CACHE_FAR);
         if clear[w] == 0.0 {
-            kept[w] = grown;
+            kept[w] = old;
         } else if old == 0.0 {
             kept[w] = clear[w];
         } else {

@@ -6,6 +6,7 @@
 //!use frame_bsdf
 //!use frame_light_samples
 //!use frame_radiance_cache
+//!use frame_surface_stops
 //!use gi_common
 //!use gi_sample
 //!use gi_rays
@@ -70,6 +71,35 @@
 @group(0) @binding(23) var<storage, read> gi_rays: array<SceneRay>;
 
 override GI_SHADOW_STAT: u32 = 0u;
+// The hits' states (`gi.hits.probes.*`, `gi.hits.cache.*`: GI_HIT_STATES).
+override PROBE_HIT_STAT_0: u32 = 0u;
+override PROBE_HIT_STAT_1: u32 = 0u;
+override PROBE_HIT_STAT_2: u32 = 0u;
+override PROBE_HIT_STAT_3: u32 = 0u;
+override PROBE_HIT_STAT_4: u32 = 0u;
+override PROBE_HIT_STAT_5: u32 = 0u;
+override PROBE_HIT_STAT_6: u32 = 0u;
+override CACHE_HIT_STAT_0: u32 = 0u;
+override CACHE_HIT_STAT_1: u32 = 0u;
+override CACHE_HIT_STAT_2: u32 = 0u;
+override CACHE_HIT_STAT_3: u32 = 0u;
+override CACHE_HIT_STAT_4: u32 = 0u;
+override CACHE_HIT_STAT_5: u32 = 0u;
+override CACHE_HIT_STAT_6: u32 = 0u;
+
+fn hit_stat(probe: bool, k: u32) -> u32 {
+    switch k {
+        case 0u: { return select(CACHE_HIT_STAT_0, PROBE_HIT_STAT_0, probe); }
+        case 1u: { return select(CACHE_HIT_STAT_1, PROBE_HIT_STAT_1, probe); }
+        case 2u: { return select(CACHE_HIT_STAT_2, PROBE_HIT_STAT_2, probe); }
+        case 3u: { return select(CACHE_HIT_STAT_3, PROBE_HIT_STAT_3, probe); }
+        case 4u: { return select(CACHE_HIT_STAT_4, PROBE_HIT_STAT_4, probe); }
+        case 5u: { return select(CACHE_HIT_STAT_5, PROBE_HIT_STAT_5, probe); }
+        default: { return select(CACHE_HIT_STAT_6, PROBE_HIT_STAT_6, probe); }
+    }
+}
+
+var<workgroup> w_states: array<atomic<u32>, GI_HIT_STATES>;
 // Cells the cache lights a frame at most (`CacheConfig::cells`).
 override CACHE_CELLS: u32 = 8192u;
 
@@ -92,6 +122,7 @@ fn gi_light(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         atomicStore(&w_hit, 0u);
         w_cache = cache_rays_count();
     }
+    if li < GI_HIT_STATES { atomicStore(&w_states[li], 0u); }
     let cached = workgroupUniformLoad(&w_cache);
     let first = (wg.x - GI_MAX_UPDATES) * 64u;
     if !probe && first >= cached { return; }
@@ -169,6 +200,8 @@ fn gi_light(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
                 // cache's rays meet would multiply its working set.
                 let reach = RADIANCE_CACHE_FAR;
                 let lit = gi_hit_light(at, dir, surface, space, reach, !probe, probe, true);
+                atomicAdd(&w_states[lit.miss], 1u);
+                if (lit.own & GI_SIDE_FAR) != 0u { atomicAdd(&w_states[GI_HIT_FAR_OWN], 1u); }
                 bounced = lit.reflected;
                 rest = lit.emitted;
                 // A probe takes the hit's whole light; a cache ray's cell
@@ -218,6 +251,10 @@ fn gi_light(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         let here = atomicLoad(&w_rows);
         w_base = select(0u, atomicAdd(&light_header[3], here), here > 0u);
         if atomicLoad(&w_hit) != 0u { atomicOr(&gi_answered[0], 1u); }
+    }
+    if li < GI_HIT_STATES {
+        let n = atomicLoad(&w_states[li]);
+        if n > 0u { atomicAdd(&stats[hit_stat(probe, li)], n); }
     }
     workgroupBarrier();
     var at = w_base + slot;
