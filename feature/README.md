@@ -98,11 +98,16 @@ phase, and holds the whole update:
      new or not claimed yet; none where every cell that could answer holds
      its light past an occluder (the probes see a thin wall's, a sheet's, a
      contact's point from both sides, so they cannot stand in there). A two-sided surface's far side:
-     the cache's indirect part where it has one (nothing of the probes',
-     which at a point on a thin surface hold the near side's light too), and
-     its direct light always from the probe's own light sample through the
-     frame BSDF's thin lobe, its shadow ray from the lit side (a far side's
-     cell exists only where rays from that side met it);
+     the far side's cell's light where the cache has it, direct and
+     indirect, through the frame BSDF's thin lobe (transmission times
+     irradiance / pi); where it has none (a far side's cell exists only
+     where rays from that side met it: never inside a voxel of leaves),
+     nothing of the probes' (which at a point on a thin surface hold the
+     near side's light too) and the direct light from the probe's own light
+     sample through the thin lobe, its shadow ray from the lit side. Light
+     queries and shadow rays are made for the hits lit on the spot alone
+     (compacted from row 0): the batch and the stream are sized for every
+     probe ray, the work follows those hits;
    - a cache ray: its hit's emission into `gi_pending`, and apart
      (`gi_cell_pending`) what it reflects of the cache's indirect light there
      (the bounced part's update; none from a hit the cache has no light for),

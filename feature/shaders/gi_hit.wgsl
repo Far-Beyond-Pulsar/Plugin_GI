@@ -117,25 +117,26 @@ fn gi_hit_light(at: vec3<f32>, dir: vec3<f32>, surface: SceneSurface, space: u32
         if own_light && !front.found { lit.own |= GI_SIDE_NEAR; }
     }
     if any(through > vec3<f32>(0.0)) {
-        // What passes through from the far side: its indirect light from
-        // the cache (nothing where it has none: at a point on a thin surface
-        // the probes hold the near side's light too, both sides' probes
-        // seeing the point, so the surface's own light would come back
-        // through it) and, for a reader that
-        // lights a side itself, its direct light from a light sample of the
-        // reader's own through the frame BSDF's thin lobe, the shadow ray
-        // from the lit side (`gi_hit_direct`). A far side's cell exists only
-        // where rays from that side met it (never inside a voxel of
-        // leaves, under a canopy's top), so the lights' light through a
-        // two-sided surface is not left to it.
+        // What passes through from the far side: the far side's cell's
+        // light where the cache has it (its direct and indirect parts, the
+        // frame BSDF's thin lobe: transmission times irradiance / pi), and
+        // nothing of the probes' where it has none (at a point on a thin
+        // surface the probes hold the near side's light too, both sides'
+        // probes seeing the point, so the surface's own light would come
+        // back through it). A far side's cell exists only where rays from
+        // that side met it (never inside a voxel of leaves, under a
+        // canopy's top): where there is none, a reader that lights a side
+        // itself takes the far side's direct light from a light sample of
+        // its own through the thin lobe, the shadow ray from the lit side
+        // (`gi_hit_direct`).
         let back = gi_hit_cell(at, -side, -s.normal, space, reach, false);
-        let back_direct = !indirect_only && !own_light;
         if back.found {
-            lit.reflected += through * (back.indirect + select(vec3<f32>(0.0), back.direct, back_direct));
+            lit.reflected += through * (back.indirect + select(vec3<f32>(0.0), back.direct, !indirect_only));
+        } else if own_light {
+            lit.own |= GI_SIDE_FAR;
         }
         lit.answered = lit.answered && back.found;
         lit.waiting = lit.waiting || back.waiting;
-        if own_light { lit.own |= GI_SIDE_FAR; }
     }
     return lit;
 }
