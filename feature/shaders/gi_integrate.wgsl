@@ -10,10 +10,12 @@
 // blended into the probe; its distances into the probe's moments (a lane a
 // texel). The one hold is readiness: a probe never updated more than 1/32
 // of whose hits met cells still new (a scene loading, the eye somewhere
-// new) holds and goes on the held list (`gi_held`), which brings it back to
-// the schedule's front once the cache has lit those cells (`integrate.rs`),
-// so its first update does not take the probes' own empty state for the
-// light there. A probe whose rays mostly meet insides is inside the ground
+// new) holds once and goes on the held list (`gi_held`), which brings it
+// back to the schedule's front once the cache has lit those cells
+// (`integrate.rs`), so its first update does not take the probes' own
+// empty state for the light there. Once: where its cells are new again by
+// then (a working set larger than the cache's slots, which churns), it
+// updates with its hits lit on the spot rather than wait for good. A probe whose rays mostly meet insides is inside the ground
 // (or a wall). On a frame where no probe ray met anything the probes hold.
 
 @group(0) @binding(0) var<uniform> frame_gi: GiFrame;
@@ -72,8 +74,9 @@ fn gi_integrate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_
     let updates = state >> 8u;
     workgroupBarrier();
     if li == 0u {
-        w_hold = u32(updates == 0u && atomicLoad(&w_waiting) * 32u > atomicLoad(&w_hits));
+        w_hold = u32(updates == 0u && (state & GI_HELD_ONCE) == 0u && atomicLoad(&w_waiting) * 32u > atomicLoad(&w_hits));
         if w_hold != 0u {
+            gi_probes[at + GI_STATE_WORD] = state | GI_HELD_ONCE;
             let k = atomicAdd(&gi_held[0], 1u);
             if k < GI_HELD { atomicStore(&gi_held[1u + k], index); }
         }
