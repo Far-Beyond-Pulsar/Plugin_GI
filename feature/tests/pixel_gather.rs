@@ -547,10 +547,9 @@ fn occluded_reuse(motion: Option<fn(u64) -> Camera>) {
         let input = signals[k].iter().sum::<f32>() / signals[k].len() as f32;
         out / input * std::f32::consts::PI / 3.0
     };
+    let (whole_plain, whole_reuse) = (whole(0), whole(1));
     eprintln!(
-        "the denoiser's output over its input (1: the mean kept): plain {:.4}, reuse {:.4}",
-        whole(0),
-        whole(1)
+        "the denoiser's output over its input (1: the mean kept): plain {whole_plain:.4}, reuse {whole_reuse:.4}"
     );
     let [raw_dark_plain, raw_dark_reuse] = raw(true);
     let [raw_lit_plain, raw_lit_reuse] = raw(false);
@@ -563,14 +562,12 @@ fn occluded_reuse(motion: Option<fn(u64) -> Camera>) {
     );
     // Reuse carries none of the near side's light to the far side and
     // leaves the near side's light as the plain rays find it, in the
-    // gather's own estimate (before the denoiser). After the denoiser both
-    // move: the denoiser weighs its records by their variance, so a noisier
-    // signal (one plain ray a block) comes out darker than a resampled one
-    // of the same mean (the near side 0.97-1.01 before it, 1.13-1.21
-    // after), and its spatial filter, which sees no occluder, carries the
-    // smoother resampled signal's near-side light over the wall's foot
-    // (the far side's pixels beside it 1.47 of the plain rays' after it,
-    // 1.05 before). Those are the denoiser's, reported, not the gather's.
+    // gather's own estimate (before the denoiser). The denoiser keeps both
+    // signals' means (`helio-pass-denoise`: no weight depends on the light
+    // it filters): its output over its input within 3% for the plain rays
+    // (one a block, the noisier) and the resampled signal alike, where a
+    // variance-weighted denoiser kept 0.77-0.85 of the plain rays' and so
+    // set the two apart after it.
     assert!(
         raw_dark_reuse < 1.15 * raw_dark_plain,
         "before the denoiser {raw_dark_reuse} {raw_dark_plain}"
@@ -579,6 +576,12 @@ fn occluded_reuse(motion: Option<fn(u64) -> Camera>) {
         (raw_lit_reuse / raw_lit_plain - 1.0).abs() < 0.05,
         "{raw_lit_reuse} {raw_lit_plain}"
     );
+    for (what, ratio) in [("plain", whole_plain), ("reuse", whole_reuse)] {
+        assert!(
+            (ratio - 1.0).abs() < 0.03,
+            "the denoiser's output over its input, {what}: {ratio}"
+        );
+    }
 }
 
 /// A light switched off: the re-traced samples find their light gone and
