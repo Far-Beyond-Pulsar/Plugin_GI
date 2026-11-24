@@ -338,7 +338,9 @@ resolve the probes). Frame contracts only (`gather.rs`, `gi_gather.wgsl`):
    generalised RIS with the reservoir where the pixel was, from the frame's
    history's taps, M capped at 8), `gather_spatial` (combined with 4
    neighbours' within 3 texels, balance-heuristic MIS over their receivers;
-   not kept) and, where the chosen sample was taken by another receiver (the
+   not kept; a neighbour or a previous receiver is taken only where the
+   frame's surface stops pass it, `frame_surface_stops`: the denoiser's
+   normal and plane stops and its walk over the depth between the two) and, where the chosen sample was taken by another receiver (the
    previous frame's, a neighbour's), a visibility ray to it into the stream
    `gi_pixels_visibility`. The tracers answer. Reservoirs are 32 bytes:
    the receiver as a distance and direction from the eye, normals in 8:8
