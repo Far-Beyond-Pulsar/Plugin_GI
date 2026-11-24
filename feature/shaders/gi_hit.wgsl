@@ -43,10 +43,13 @@ fn gi_hit_cell(at: vec3<f32>, side: vec3<f32>, n: vec3<f32>, space: u32, reach: 
     let c = radiance_cache_read(p, side, space, reach);
     if mark { radiance_cache_mark(p, side, space, reach); }
     if c.found { return GiHitCell(c.direct / PI, c.indirect / PI, true, false); }
+    // Waiting: the surface's cell is in the cache (this mark's claim, or an
+    // earlier one) and has no value yet. A key the hash turned away (both
+    // buckets full, the new cells' queue full) waits on nothing.
     var waiting = false;
     if radiance_cache_present() {
         let s = radiance_cache_find(radiance_cache_key(p, side, radiance_cache_level(p), space));
-        waiting = s == RADIANCE_CACHE_NONE || !radiance_cache_has_value(radiance_cache_entries[s]);
+        waiting = s != RADIANCE_CACHE_NONE && !radiance_cache_has_value(radiance_cache_entries[s]);
     }
     return GiHitCell(vec3<f32>(0.0), gi_irradiance(at, n).rgb, false, waiting);
 }
