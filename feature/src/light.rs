@@ -79,6 +79,9 @@ const PROBE_HIT_STATS: [&str; crate::HIT_STATES.len()] = [
     "PROBE_HIT_STAT_3",
     "PROBE_HIT_STAT_4",
     "PROBE_HIT_STAT_5",
+    "PROBE_HIT_STAT_6",
+    "PROBE_HIT_STAT_7",
+    "PROBE_HIT_STAT_8",
 ];
 const CACHE_HIT_STATS: [&str; crate::HIT_STATES.len()] = [
     "CACHE_HIT_STAT_0",
@@ -87,6 +90,9 @@ const CACHE_HIT_STATS: [&str; crate::HIT_STATES.len()] = [
     "CACHE_HIT_STAT_3",
     "CACHE_HIT_STAT_4",
     "CACHE_HIT_STAT_5",
+    "CACHE_HIT_STAT_6",
+    "CACHE_HIT_STAT_7",
+    "CACHE_HIT_STAT_8",
 ];
 
 /// The cache's bindings both passes declare (17..23 of `gi_light.wgsl`).

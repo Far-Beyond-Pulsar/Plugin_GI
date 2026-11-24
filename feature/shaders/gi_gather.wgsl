@@ -215,6 +215,9 @@ override PIXEL_HIT_STAT_2: u32 = 0u;
 override PIXEL_HIT_STAT_3: u32 = 0u;
 override PIXEL_HIT_STAT_4: u32 = 0u;
 override PIXEL_HIT_STAT_5: u32 = 0u;
+override PIXEL_HIT_STAT_6: u32 = 0u;
+override PIXEL_HIT_STAT_7: u32 = 0u;
+override PIXEL_HIT_STAT_8: u32 = 0u;
 
 fn pixel_hit_stat(k: u32) -> u32 {
     switch k {
@@ -223,7 +226,10 @@ fn pixel_hit_stat(k: u32) -> u32 {
         case 2u: { return PIXEL_HIT_STAT_2; }
         case 3u: { return PIXEL_HIT_STAT_3; }
         case 4u: { return PIXEL_HIT_STAT_4; }
-        default: { return PIXEL_HIT_STAT_5; }
+        case 5u: { return PIXEL_HIT_STAT_5; }
+        case 6u: { return PIXEL_HIT_STAT_6; }
+        case 7u: { return PIXEL_HIT_STAT_7; }
+        default: { return PIXEL_HIT_STAT_8; }
     }
 }
 
@@ -722,6 +728,8 @@ fn gather_hits(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invo
             let lit = gi_hit_light(m.point - eye, ray.dir, surface, space, false, true, true);
             atomicAdd(&w_states[lit.miss], 1u);
             if (lit.own & GI_SIDE_FAR) != 0u { atomicAdd(&w_states[GI_HIT_FAR_OWN], 1u); }
+            if lit.finer { atomicAdd(&w_states[GI_HIT_FINER], 1u); }
+            if lit.claimed { atomicAdd(&w_states[select(GI_HIT_CLAIMED, GI_HIT_CLAIMED_FINER, lit.finer)], 1u); }
             light.rest = scene_pack_radiance(lit.reflected + lit.emitted);
             light.cache_y = cache_luminance(m.point, m.normal, surface, space);
             if lit.own != 0u {

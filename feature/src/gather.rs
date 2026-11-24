@@ -866,6 +866,9 @@ const PIXEL_HIT_STATS: [&str; crate::HIT_STATES.len()] = [
     "PIXEL_HIT_STAT_3",
     "PIXEL_HIT_STAT_4",
     "PIXEL_HIT_STAT_5",
+    "PIXEL_HIT_STAT_6",
+    "PIXEL_HIT_STAT_7",
+    "PIXEL_HIT_STAT_8",
 ];
 
 impl GiGatherHitsPass {

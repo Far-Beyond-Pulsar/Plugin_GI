@@ -214,14 +214,19 @@ fn rotation(seed: u64) -> [f32; 4] {
 /// `gi_hit.wgsl`'s GI_HIT_STATES): how the cache answered the side its ray
 /// met (`cache`: it had light; otherwise the contract's
 /// `RADIANCE_CACHE_MISS_*`), then the hits whose far side took the reader's
-/// own light sample (`far_own`).
-pub const HIT_STATES: [&str; 6] = [
+/// own light sample (`far_own`) and those whose read went to a cell finer
+/// than their surface's level (`finer`: past an occluder, a surface turned
+/// away).
+pub const HIT_STATES: [&str; 9] = [
     "cache",
     "absent",
     "new",
     "unexplored",
     "occluded",
     "far_own",
+    "finer",
+    "claimed",
+    "claimed_finer",
 ];
 
 /// A shader's hit-state overrides `overrides` (in [`HIT_STATES`]' order) as

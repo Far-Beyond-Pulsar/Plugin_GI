@@ -78,12 +78,18 @@ override PROBE_HIT_STAT_2: u32 = 0u;
 override PROBE_HIT_STAT_3: u32 = 0u;
 override PROBE_HIT_STAT_4: u32 = 0u;
 override PROBE_HIT_STAT_5: u32 = 0u;
+override PROBE_HIT_STAT_6: u32 = 0u;
+override PROBE_HIT_STAT_7: u32 = 0u;
+override PROBE_HIT_STAT_8: u32 = 0u;
 override CACHE_HIT_STAT_0: u32 = 0u;
 override CACHE_HIT_STAT_1: u32 = 0u;
 override CACHE_HIT_STAT_2: u32 = 0u;
 override CACHE_HIT_STAT_3: u32 = 0u;
 override CACHE_HIT_STAT_4: u32 = 0u;
 override CACHE_HIT_STAT_5: u32 = 0u;
+override CACHE_HIT_STAT_6: u32 = 0u;
+override CACHE_HIT_STAT_7: u32 = 0u;
+override CACHE_HIT_STAT_8: u32 = 0u;
 
 fn hit_stat(probe: bool, k: u32) -> u32 {
     switch k {
@@ -92,7 +98,10 @@ fn hit_stat(probe: bool, k: u32) -> u32 {
         case 2u: { return select(CACHE_HIT_STAT_2, PROBE_HIT_STAT_2, probe); }
         case 3u: { return select(CACHE_HIT_STAT_3, PROBE_HIT_STAT_3, probe); }
         case 4u: { return select(CACHE_HIT_STAT_4, PROBE_HIT_STAT_4, probe); }
-        default: { return select(CACHE_HIT_STAT_5, PROBE_HIT_STAT_5, probe); }
+        case 5u: { return select(CACHE_HIT_STAT_5, PROBE_HIT_STAT_5, probe); }
+        case 6u: { return select(CACHE_HIT_STAT_6, PROBE_HIT_STAT_6, probe); }
+        case 7u: { return select(CACHE_HIT_STAT_7, PROBE_HIT_STAT_7, probe); }
+        default: { return select(CACHE_HIT_STAT_8, PROBE_HIT_STAT_8, probe); }
     }
 }
 
@@ -191,6 +200,8 @@ fn gi_light(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
                 let lit = gi_hit_light(at, dir, surface, space, !probe, probe, true);
                 atomicAdd(&w_states[lit.miss], 1u);
                 if (lit.own & GI_SIDE_FAR) != 0u { atomicAdd(&w_states[GI_HIT_FAR_OWN], 1u); }
+                if lit.finer { atomicAdd(&w_states[GI_HIT_FINER], 1u); }
+                if lit.claimed { atomicAdd(&w_states[select(GI_HIT_CLAIMED, GI_HIT_CLAIMED_FINER, lit.finer)], 1u); }
                 bounced = lit.reflected;
                 rest = lit.emitted;
                 // A probe takes the hit's whole light; a cache ray's cell
