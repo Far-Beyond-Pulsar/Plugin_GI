@@ -16,7 +16,9 @@
 //! 3. The kinds' tracers answer the stream (`stream::trace`): each ray's
 //!    nearest hit and its surface.
 //! 4. [`GiLightPass`]: every hit's light from the cache (a probe's hit all of
-//!    it, a cache ray's hit its indirect part), marking its cell; a light
+//!    it, a cache ray's hit its indirect part), the probes' hits claiming
+//!    their cells only where there is no pixels' gather (`gather.rs`, the
+//!    claimer otherwise); a light
 //!    query at each cache ray's hit and at its cell into the cache's light
 //!    batch ([`light_batch`]).
 //! 5. The frame's light samplers answer it (`light_samples::sample`): one

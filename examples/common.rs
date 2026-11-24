@@ -435,6 +435,22 @@ pub fn point_light(position: [f32; 3], color: [f32; 3], intensity: f32, range: f
     }
 }
 
+/// A directional light shining along `direction` (a scene's sun: the sky
+/// takes the scene's first directional light as its sun). `shadow_index` as
+/// [`point_light`]'s.
+pub fn directional_light(direction: [f32; 3], color: [f32; 3], intensity: f32) -> GpuLight {
+    GpuLight {
+        position_range: [0.0, 0.0, 0.0, f32::MAX],
+        direction_outer: [direction[0], direction[1], direction[2], 0.0],
+        color_intensity: [color[0], color[1], color[2], intensity],
+        shadow_index: u32::MAX,
+        light_type: LightType::Directional as u32,
+        inner_angle: 0.0,
+        _pad: 0,
+        ..Default::default()
+    }
+}
+
 /// Insert the scene's atmosphere: Earth's air, its Rayleigh scattering
 /// tinted towards `tint` (each channel scaled by `tint` over its largest
 /// channel). The sky is scene content too: the renderer only receives the

@@ -52,13 +52,14 @@ struct GiHitCell {
 }
 
 // The cache at eye-relative hit `at` on the side of unit `side` (normal `n`)
-// in space `space`: read and marked with one find a level
-// (`radiance_cache_read_mark`) when `mark`, read alone otherwise.
-fn gi_hit_cell(at: vec3<f32>, side: vec3<f32>, n: vec3<f32>, space: u32, mark: bool) -> GiHitCell {
+// in space `space`, for a ray `footprint` wide there: read and marked with
+// one find a level (`radiance_cache_read_mark`) when `mark`, read alone
+// otherwise.
+fn gi_hit_cell(at: vec3<f32>, side: vec3<f32>, n: vec3<f32>, space: u32, footprint: f32, mark: bool) -> GiHitCell {
     let p = at + gi_trace.eye.xyz;
     var c: RadianceCacheIrradiance;
-    if mark { c = radiance_cache_read_mark(p, side, space); } else { c = radiance_cache_read(p, side, space); }
-    let finer = radiance_cache_present() && c.level < radiance_cache_level(p);
+    if mark { c = radiance_cache_read_mark(p, side, space, footprint); } else { c = radiance_cache_read(p, side, space, footprint); }
+    let finer = radiance_cache_present() && c.level < radiance_cache_level_at(p, footprint);
     if c.found { return GiHitCell(c.direct / PI, c.indirect / PI, true, false, RADIANCE_CACHE_MISS_NONE, finer, false); }
     if c.miss == RADIANCE_CACHE_MISS_UNEXPLORED { return GiHitCell(vec3<f32>(0.0), c.indirect / PI, false, false, c.miss, finer, false); }
     if radiance_cache_miss_stays(c.miss) { return GiHitCell(vec3<f32>(0.0), vec3<f32>(0.0), false, false, c.miss, finer, false); }
@@ -95,25 +96,29 @@ struct GiHitLight {
 }
 
 // The light a hit at eye-relative `at` sends back along its ray's unit
-// direction `dir`: a Lambertian surface `surface` (a stream's row) lit by
-// the cache on the side the ray met, plus its transmission share of the far
-// side's cell (two-sided leaves), and what it emits (`gi_hit_cell`). Where
+// direction `dir` (`footprint` wide there: the cache's level it reads,
+// `radiance_cache_level_at`): a Lambertian surface `surface` (a stream's
+// row) lit by the cache on the side the ray met, plus its transmission share
+// of the far side's cell (two-sided leaves), and what it emits
+// (`gi_hit_cell`). Where
 // the cache has no light for a side, the hit is lit on the spot: its
 // indirect light by why (`GiHitCell`) and, for
 // a reader that lights such a side itself (`own_light`), its own light
 // sample for the direct (the side is in `own`). A side's direct light is
 // none for `indirect_only` (the reader lights every side itself). The near
-// side's cell is marked where `mark`; the far side's is read, never marked:
+// side's cell is claimed and marked where `mark` (the screen's reader: the
+// pixels' gather, or the probes where there is none); the far side's is
+// read, never marked:
 // the hit is on the side its ray met, and behind it may be the inside of
 // what lets light through (a voxel of leaves: a cell seated there would
 // start its rays in it). The far side's cells are the ones rays from that
 // side make.
-fn gi_hit_light(at: vec3<f32>, dir: vec3<f32>, surface: SceneSurface, space: u32, indirect_only: bool, own_light: bool, mark: bool) -> GiHitLight {
+fn gi_hit_light(at: vec3<f32>, dir: vec3<f32>, footprint: f32, surface: SceneSurface, space: u32, indirect_only: bool, own_light: bool, mark: bool) -> GiHitLight {
     let s = scene_surface_unpack(surface);
     let face = scene_surface_face(surface);
     let side = select(face, -face, dot(face, dir) > 0.0);
     let through = surface_transmission(s);
-    let front = gi_hit_cell(at, side, s.normal, space, mark);
+    let front = gi_hit_cell(at, side, s.normal, space, footprint, mark);
     let dark = all(s.albedo.rgb == vec3<f32>(0.0));
     var lit = GiHitLight(vec3<f32>(0.0), s.emissive, front.found || dark, front.waiting && !dark, 0u, front.miss, front.finer, front.claimed);
     if !dark {
@@ -133,7 +138,7 @@ fn gi_hit_light(at: vec3<f32>, dir: vec3<f32>, surface: SceneSurface, space: u32
         // itself takes the far side's direct light from a light sample of
         // its own through the thin lobe, the shadow ray from the lit side
         // (`gi_hit_direct`).
-        let back = gi_hit_cell(at, -side, -s.normal, space, false);
+        let back = gi_hit_cell(at, -side, -s.normal, space, footprint, false);
         if back.found {
             lit.reflected += through * (back.indirect + select(vec3<f32>(0.0), back.direct, !indirect_only));
         } else if own_light {

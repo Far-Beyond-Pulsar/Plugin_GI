@@ -34,9 +34,12 @@
 //   pixel's normal) into the stream `gi_pixels`, and for one reservoir in
 //   GATHER period, a ray re-tracing its kept sample.
 // - `gather_hits` (a texel): its ray's hit lit as GI lights a hit
-//   (`gi_hit_light`: the cell's prefiltered light, as the probes' hits take
-//   it); a side the cache has no light for is lit on the spot, a light
-//   query for its own direct light (`gi_pixels` light batch).
+//   (`gi_hit_light`, read at the ray's footprint there: the cell's
+//   prefiltered indirect light; a side the cache has no cell for, the
+//   probes'), its direct light a light query of its own (`gi_pixels` light
+//   batch), exact at the hit: a cell's direct light is its point's, which
+//   near a light differs across the cell far more than its indirect does.
+//   Its mark claims the cell: the gather is the cache's one claimer.
 // - `gather_shadow` (a query): its light sample's light at the hit, waiting
 //   on a shadow ray (`gi_pixels_shadow`).
 // - `gather_validate` (a texel): a re-traced sample's light now; a sample
@@ -661,8 +664,8 @@ fn block_reach(footprint: f32) -> f32 {
 // The luminance of the cache's whole light at a hit (the front side's cell,
 // read without claiming it, as a reader in the air: a light that changed
 // shows wherever the cell holds), what a re-trace compares; 0 where none.
-fn cache_luminance(point: vec3<f32>, side: vec3<f32>, surface: SceneSurface, space: u32) -> f32 {
-    let c = radiance_cache_read(point, side, space);
+fn cache_luminance(point: vec3<f32>, side: vec3<f32>, footprint: f32, surface: SceneSurface, space: u32) -> f32 {
+    let c = radiance_cache_read(point, side, space, footprint);
     if !c.found { return 0.0; }
     let s = scene_surface_unpack(surface);
     return luminance(s.albedo.rgb * (c.direct + c.indirect) / PI + s.emissive);
@@ -725,23 +728,21 @@ fn gather_hits(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invo
             let surface = surfaces[i];
             let footprint = scene_ray_footprint(ray, m.t);
             let space = scene_ray_space(ray);
-            let lit = gi_hit_light(m.point - eye, ray.dir, surface, space, false, true, true);
+            let lit = gi_hit_light(m.point - eye, ray.dir, footprint, surface, space, true, false, true);
             atomicAdd(&w_states[lit.miss], 1u);
-            if (lit.own & GI_SIDE_FAR) != 0u { atomicAdd(&w_states[GI_HIT_FAR_OWN], 1u); }
             if lit.finer { atomicAdd(&w_states[GI_HIT_FINER], 1u); }
             if lit.claimed { atomicAdd(&w_states[select(GI_HIT_CLAIMED, GI_HIT_CLAIMED_FINER, lit.finer)], 1u); }
             light.rest = scene_pack_radiance(lit.reflected + lit.emitted);
-            light.cache_y = cache_luminance(m.point, m.normal, surface, space);
-            if lit.own != 0u {
-                // A side the cache has no light for: its own light sample,
-                // two-sided where its far side lights itself.
-                let s = scene_surface_unpack(surface);
-                let seed = gi_hash(i ^ gather.info.y * 0x9e3779b9u);
-                let u = texel_sample(i, gather.info.y, 1u);
-                query = light_query_point(m.point, footprint, s.normal, (lit.own & GI_SIDE_FAR) != 0u, u, seed, space);
-                light.light = lit.own;
-                want = true;
-            }
+            light.cache_y = cache_luminance(m.point, m.normal, footprint, surface, space);
+            // Its direct light: a light sample of its own, two-sided where
+            // light passes through it.
+            let s = scene_surface_unpack(surface);
+            let seed = gi_hash(i ^ gather.info.y * 0x9e3779b9u);
+            let u = texel_sample(i, gather.info.y, 1u);
+            let both = any(surface_transmission(s) > vec3<f32>(0.0));
+            query = light_query_point(m.point, footprint, s.normal, both, u, seed, space);
+            light.light = GI_SIDE_NEAR | GI_SIDE_FAR;
+            want = true;
         }
     }
     var slot = 0u;
@@ -870,7 +871,7 @@ fn gather_validate(@builtin(global_invocation_id) id: vec3<u32>) {
         let expected = distance(r.sample, ray.origin);
         same = abs(m.t - expected) <= 2.0 * gi_ray_offset(m.point) + expected / 256.0;
         noise = CACHE_NOISE;
-        now = cache_luminance(m.point, m.normal, surfaces[row], scene_ray_space(ray));
+        now = cache_luminance(m.point, m.normal, scene_ray_footprint(ray, m.t), surfaces[row], scene_ray_space(ray));
     }
     var confidence = 0.0;
     if same {

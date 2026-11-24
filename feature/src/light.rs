@@ -12,8 +12,9 @@
 //! whole irradiance, or, where the cache has no light for it, lit on the
 //! spot: the probes' irradiance there and a light sample of its own; a cache
 //! ray's hit: the cache's indirect part), through it from its far side and
-//! what it emits, or the sky on a miss, into `gi_pending`, every hit marking
-//! its cell in use; and a light query for each hit that takes its own light
+//! what it emits, or the sky on a miss, into `gi_pending` (the probes'
+//! hits claiming their cells where there is no pixels' gather, the cache's
+//! rays never); and a light query for each hit that takes its own light
 //! (every cache ray's, a probe's lit on the spot) and for each cache ray's
 //! cell's point into GI's light batch ([`crate::light_batch`]), compacted
 //! from row 0. The samplers then choose one light a query (the sun is one
@@ -157,7 +158,15 @@ impl GiLightPass {
         let rays = crate::gi_stream(config);
         let batch = crate::light_batch(&config.cache);
         let uniform_usage = wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST;
-        let mut constants = vec![("CACHE_CELLS", f64::from(config.cache.cells()))];
+        // Without the pixels' gather the probes claim the cells they read
+        // (`gi_light.wgsl`'s `GI_PROBES_CLAIM`).
+        let mut constants = vec![
+            ("CACHE_CELLS", f64::from(config.cache.cells())),
+            (
+                "GI_PROBES_CLAIM",
+                f64::from(u8::from(config.pixels.is_none())),
+            ),
+        ];
         constants.extend(crate::hit_stats(stats, "probes", &PROBE_HIT_STATS));
         constants.extend(crate::hit_stats(stats, "cache", &CACHE_HIT_STATS));
         let mut reads = vec![

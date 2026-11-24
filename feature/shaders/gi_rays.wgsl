@@ -67,7 +67,9 @@ struct GiPending {
 // cell's indirect light, and what passes through it from its far side),
 // which the cell folds apart from what the hit sends as it meets it
 // (`GiPending::rest` and `light`); `unlit` 1 where the cache had no light
-// for that hit but the probes' (the bounced part leaves the ray out).
+// for that hit (the bounced part leaves the ray out: the probes' irradiance
+// there would carry light across what the cells keep apart, a thin card's
+// lit top into the shade under it).
 struct CachePending {
     light: u32,
     row: u32,

@@ -17,13 +17,18 @@
 //
 // `gi_light`: a hit's light as GI lights a hit (`gi_hit`: the radiance
 // cache's irradiance at its cell, through it from its far side, what it
-// emits), or the sky on a miss, into `gi_pending`; every hit marks its cell
-// in use (the side its ray met; the far side is read, not marked). A probe's
-// hit takes the cache's whole irradiance where the cache has light for it,
-// and is lit on the spot where it has none (the probes' irradiance there
-// and a light sample of its own). A cache ray's hit takes the cache's
-// indirect part and a light sample for its direct light, with one more
-// query a cache ray for its cell's own direct light. The queries of the
+// emits), or the sky on a miss, into `gi_pending`. The cache's rays never
+// claim or mark a cell, and the probes' only where there is no pixels'
+// gather (`GI_PROBES_CLAIM`): the cells in use are the screen's reader's, so
+// the working set follows what its rays reach (the gather's: the screen's;
+// the probes', at their rays' footprint, where they are the only reader),
+// not the closure of every cell's rays. A probe's hit takes the
+// cache's whole irradiance where the cache has light for it, and is lit on
+// the spot where it has none (a light sample of its own and the probes'
+// irradiance there: DDGI's recursion). A cache ray's hit takes the cache's
+// indirect part where it has a cell (the later bounces; none where it has
+// none) and a light sample for its direct light, with one more query a
+// cache ray for its cell's own direct light. The queries of the
 // frame's light samples (`LightQuery`) are compacted into the light batch.
 //
 // `gi_shadow`: each light sample's light, the hit's off its surface on the
@@ -71,6 +76,10 @@
 @group(0) @binding(23) var<storage, read> gi_rays: array<SceneRay>;
 
 override GI_SHADOW_STAT: u32 = 0u;
+// Whether the probes claim and mark the cells their hits read: where there
+// is no pixels' gather (`GiConfig::pixels`), the probes are the cache's
+// reader of the scene.
+override GI_PROBES_CLAIM: bool = false;
 // The hits' states (`gi.hits.probes.*`, `gi.hits.cache.*`: GI_HIT_STATES).
 override PROBE_HIT_STAT_0: u32 = 0u;
 override PROBE_HIT_STAT_1: u32 = 0u;
@@ -197,7 +206,7 @@ fn gi_light(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
                 let n = s.normal;
                 let footprint = width + spread * hit.t;
                 let through = surface_transmission(s);
-                let lit = gi_hit_light(at, dir, surface, space, !probe, probe, true);
+                let lit = gi_hit_light(at, dir, footprint, surface, space, !probe, probe, probe && GI_PROBES_CLAIM);
                 atomicAdd(&w_states[lit.miss], 1u);
                 if (lit.own & GI_SIDE_FAR) != 0u { atomicAdd(&w_states[GI_HIT_FAR_OWN], 1u); }
                 if lit.finer { atomicAdd(&w_states[GI_HIT_FINER], 1u); }
@@ -209,8 +218,8 @@ fn gi_light(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
                 if probe { rest += bounced; }
                 // A cache ray's hit the cache has no light for: no bounced
                 // light from it (the probes' irradiance there would carry
-                // light into the cache across what its cells keep apart, and
-                // the cache's light feeds itself).
+                // light into the cache across what its cells keep apart: a
+                // thin card's lit top into the shade under it).
                 if !probe && !lit.answered { cell.unlit = 1u; }
                 // The sides that take a light sample of their own: every side
                 // of a cache ray's hit (its direct light is its own), a
