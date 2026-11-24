@@ -100,7 +100,7 @@ fn gpu_cost_of_gi_passes() {
     let wide = Setup {
         gi: helio_pass_gi::GiSettings {
             cache_slots_log2: Some(22),
-            ..Default::default()
+            ..base.gi
         },
         ..base.clone()
     };

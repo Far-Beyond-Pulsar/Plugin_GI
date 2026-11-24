@@ -73,10 +73,12 @@
 //!   updates, as before, but it no longer grows between explorations (a
 //!   bound three updates in four at 1.3 times its wall's distance let a 4 m
 //!   cell's readers up to a metre past a thin wall read the lit side).
-//! - [`EVICT_AGE`] (128 frames): twice the longest a reader of the cache
-//!   leaves between two reads of a cell it keeps reading (a probe of GI's
-//!   coarser levels is updated every 41 frames), so no cell a reader still
-//!   uses goes; past half the slots the least recently used go too, keeping
+//! - [`EVICT_AGE`] (128 frames): well past the longest a marking reader
+//!   leaves between two reads of a cell it keeps reading (the pixels'
+//!   gather traces a block once in 16 frames at a sixteenth, its cells met
+//!   by many blocks' rays; a probe of GI's coarser levels, the claimer where
+//!   there is no gather, is updated every 41 frames), so no cell a reader
+//!   still uses goes; past half the slots the least recently used go too, keeping
 //!   buckets' room (a bucket of 16 at half load is full for 0.4% of keys),
 //!   down to those read in the last two frames if the cells in use need it:
 //!   a working set larger than the slots degrades by evicting the least

@@ -589,7 +589,7 @@ fn read_cache(@builtin(global_invocation_id) id: vec3<u32>) {
     if i >= info.x { return; }
     let q = queries[i];
     let space = bitcast<u32>(q.n.w);
-    let e = radiance_cache_read(q.p.xyz, q.n.xyz, space);
+    let e = radiance_cache_read(q.p.xyz, q.n.xyz, space, 0.0);
     var history = vec2<f32>(0.0);
     let s = radiance_cache_find(radiance_cache_key(q.p.xyz, q.n.xyz, radiance_cache_level(q.p.xyz), space));
     if s != RADIANCE_CACHE_NONE {
@@ -599,7 +599,7 @@ fn read_cache(@builtin(global_invocation_id) id: vec3<u32>) {
     out[i * 3u] = vec4<f32>(e.direct, select(-1.0, f32(e.level), e.found));
     out[i * 3u + 1u] = vec4<f32>(e.indirect, 0.0);
     out[i * 3u + 2u] = vec4<f32>(history, 0.0, 0.0);
-    if info.y != 0u { radiance_cache_mark(q.p.xyz, q.n.xyz, space); }
+    if info.y != 0u { radiance_cache_mark(q.p.xyz, q.n.xyz, space, 0.0); }
 }
 "#;
 
@@ -617,7 +617,7 @@ struct CacheReader {
 }
 
 /// The most queries a test reads at once.
-pub const MAX_QUERIES: u64 = 8192;
+pub const MAX_QUERIES: u64 = 16384;
 
 impl CacheReader {
     fn new(device: &wgpu::Device, queries: CacheQueries, origin: Origin) -> Self {
@@ -807,7 +807,9 @@ pub struct Setup {
     /// An atmosphere whose sky is black (its frame and sky table published
     /// as the sky publishes them), over the flat sky.
     pub black_atmosphere: bool,
-    /// GI's settings.
+    /// GI's settings (by default the `probes` quality: this harness draws
+    /// no G-buffer, so there is no pixels' gather, and the probes are the
+    /// cache's claimer, as a host at that quality runs them).
     pub gi: GiSettings,
 }
 
@@ -822,7 +824,10 @@ impl Default for Setup {
             traced: true,
             late: None,
             black_atmosphere: false,
-            gi: GiSettings::default(),
+            gi: GiSettings {
+                quality: helio_pass_gi::GiQuality::Probes,
+                ..Default::default()
+            },
         }
     }
 }

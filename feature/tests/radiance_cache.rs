@@ -21,7 +21,11 @@ const HALF: f32 = 128.0 / 255.0;
 /// The longest a test waits for its signal.
 const GUARD: Duration = Duration::from_secs(300);
 
-fn harness(setup: Setup, shapes: Vec<Shape>) -> Option<Harness> {
+/// The harness at GI's default quality: the probes and the cache's rays
+/// read only, and the tests' reads mark, as the pixels' gather does (this
+/// harness draws no G-buffer: the reads stand for the gather's hits).
+fn harness(mut setup: Setup, shapes: Vec<Shape>) -> Option<Harness> {
+    setup.gi.quality = GiSettings::default().quality;
     Some(Harness::new(gpu()?, setup, shapes))
 }
 
@@ -55,6 +59,12 @@ fn until(
 /// them). Renders frames until then, under the wall-clock guard; the frames
 /// it took and the last reads.
 fn settle(h: &mut Harness, what: &str) -> (usize, Vec<CacheRead>) {
+    settle_first(h, what, usize::MAX)
+}
+
+/// [`settle`] judging the first `judged` reads (the others a camera's
+/// marks, [`walls`]).
+fn settle_first(h: &mut Harness, what: &str, judged: usize) -> (usize, Vec<CacheRead>) {
     let start = Instant::now();
     let hold = 2 * refresh_period() as usize;
     let mut frames = 0;
@@ -63,7 +73,8 @@ fn settle(h: &mut Harness, what: &str) -> (usize, Vec<CacheRead>) {
     loop {
         let stats = h.frame_stats();
         frames += 1;
-        let reads = h.cache_reads();
+        let mut reads = h.cache_reads();
+        reads.truncate(judged);
         let histories: Vec<[u32; 2]> = reads.iter().map(|r| r.history).collect();
         still = if histories == last { still + 1 } else { 0 };
         last = histories;
@@ -298,6 +309,40 @@ fn lit_box(setup: &Setup) -> LitBox {
     }
 }
 
+/// Points `step` metres apart on each of the six inner walls of the box
+/// from `lo` to `hi`, facing into it, in coordinate space `space`: what a
+/// camera inside it marks (a point a cell of the walls' level, `step` their
+/// width).
+fn walls(lo: DVec3, hi: DVec3, step: f64, space: u32) -> Vec<CacheQuery> {
+    let mut queries = Vec::new();
+    for axis in 0..3 {
+        let (a, b) = ((axis + 1) % 3, (axis + 2) % 3);
+        let (na, nb) = (
+            ((hi[a] - lo[a]) / step).round().max(1.0) as usize,
+            ((hi[b] - lo[b]) / step).round().max(1.0) as usize,
+        );
+        for (at, sign) in [(lo[axis], 1.0f32), (hi[axis], -1.0)] {
+            for i in 0..na {
+                for j in 0..nb {
+                    let (u, v) = ((i as f64 + 0.5) / na as f64, (j as f64 + 0.5) / nb as f64);
+                    let mut p = DVec3::ZERO;
+                    p[axis] = at;
+                    p[a] = lo[a] + (hi[a] - lo[a]) * u;
+                    p[b] = lo[b] + (hi[b] - lo[b]) * v;
+                    let mut normal = Vec3::ZERO;
+                    normal[axis] = sign;
+                    queries.push(CacheQuery {
+                        world: p,
+                        normal,
+                        space,
+                    });
+                }
+            }
+        }
+    }
+    queries
+}
+
 fn lit_box_setup(origin: DVec3) -> (Setup, LitBox) {
     let mut setup = Setup {
         origin,
@@ -312,7 +357,10 @@ fn lit_box_setup(origin: DVec3) -> (Setup, LitBox) {
     (setup, b)
 }
 
-/// A closed box with one point light: once a cell's history is full, the
+/// A closed box with one point light, its six walls marked as a camera
+/// inside it would (a point every eighth of a metre, the walls' cells: the
+/// cache's cells are those a marking reader uses, and the bounces between
+/// the walls go through theirs): once a cell's history is full, the
 /// irradiance the cache holds at four wall points matches the brute-force
 /// radiosity solution on the CPU: the direct part (one delta light, no
 /// occlusion: every sample exact) within 1% (RGB9E5's 9 bits of mantissa
@@ -328,8 +376,19 @@ fn a_lit_box_converges_to_its_radiosity_solution() {
     let Some(mut h) = harness(setup, vec![room]) else {
         return;
     };
+    // The four reads seat their cells first (a cell's point, and its direct
+    // light, are its first mark's), then the camera's marks join them.
     h.read_cache(b.queries.clone(), true);
-    let (frames, _) = settle(&mut h, "the box's cells settle");
+    h.frames(2);
+    h.read_cache(
+        [
+            b.queries.clone(),
+            walls(b.lo, b.hi, 0.125, space_of_slot(0)),
+        ]
+        .concat(),
+        true,
+    );
+    let (frames, _) = settle_first(&mut h, "the box's cells settle", b.queries.len());
     let reads = mean_reads(&mut h, 128);
     let truth = box_indirect(
         b.lo,
@@ -482,8 +541,8 @@ fn a_thin_card_lets_the_sun_through_to_the_floor_under_it() {
 /// side gets no light at all. Read on the dark side next to the wall with
 /// the eye as far from the reads as makes their surfaces' cells 1/8 m to
 /// 4 m wide (the eye angle's), so each read's cell is wider than the wall
-/// and holds both sides (the lit side's cells marked by the probes' and the
-/// cache's rays, read on the lit side too): the dark reads find their own
+/// and holds both sides (the lit read's cells, seated on the lit side; the
+/// reads mark, as the pixels' gather does): the dark reads find their own
 /// side's cells, which hold under 1% of the lit side's light (without the
 /// cells' clear distances the dark side reads the lit side's whole light
 /// from 1/4 m up). Twice: a wall standing on the floor (the floor's cells
@@ -576,8 +635,15 @@ fn a_light_switched_off_leaves_the_cache_within_a_bound() {
     let Some(mut h) = harness(setup, vec![room]) else {
         return;
     };
-    h.read_cache(b.queries.clone(), true);
-    settle(&mut h, "the box's cells settle");
+    h.read_cache(
+        [
+            b.queries.clone(),
+            walls(b.lo, b.hi, 0.125, space_of_slot(0)),
+        ]
+        .concat(),
+        true,
+    );
+    settle_first(&mut h, "the box's cells settle", b.queries.len());
     let lit: Vec<Vec3> = mean_reads(&mut h, 16)
         .iter()
         .map(|(d, i)| *d + *i)
@@ -683,7 +749,9 @@ fn an_origin_change_moves_no_entry_and_changes_no_value() {
         );
         kept += 1;
     }
-    assert!(kept > 4, "{kept} settled cells");
+    // The four reads' cells: the furnace's only cells (neither the probes'
+    // rays nor the cache's own claim any).
+    assert!(kept >= 4, "{kept} settled cells");
     for (a, b) in before.iter().zip(&after) {
         assert_eq!(a.level, b.level);
         assert_eq!((a.direct, a.indirect), (b.direct, b.indirect));
@@ -710,16 +778,21 @@ fn a_cell_at_earth_scale_behaves_as_one_near_zero() {
             ..Default::default()
         };
         let (room, queries) = furnace(&setup, 0.5);
+        let c = setup.world_eye();
         let Some(mut h) = harness(setup, vec![room]) else {
             return;
         };
-        h.read_cache(queries, true);
+        // The walls marked as a camera in the room would (the bounces go
+        // through their cells: the walls' cells are 2 m wide from the eye).
+        let judged = queries.len();
+        h.read_cache([queries, walls(c - 50.0, c + 50.0, 2.0, 0)].concat(), true);
         let want = 2.0 * std::f32::consts::PI;
-        let (frames, reads) = until(&mut h, "the furnace converges", |reads| {
-            reads
+        let (frames, mut reads) = until(&mut h, "the furnace converges", |reads| {
+            reads[..judged]
                 .iter()
                 .all(|r| r.level.is_some() && (r.indirect.x / want - 1.0).abs() < 0.01)
         });
+        reads.truncate(judged);
         println!("origin {origin}: within 1% of 2 pi after {frames} frames: {reads:?}");
         results.push((frames, reads));
     }
@@ -755,8 +828,9 @@ fn a_small_cache_evicts_and_reuses_its_slots() {
         return;
     };
     let slots = 1usize << 13;
-    // The probes' cells alone, once their rays have met the room for a few
-    // frames.
+    // The cells in use before the sets (none: neither the probes' rays nor
+    // the cache's own claim any), once their rays have met the room for a
+    // few frames.
     for _ in 0..8 {
         h.frame_stats();
     }
@@ -814,9 +888,11 @@ fn a_small_cache_evicts_and_reuses_its_slots() {
         "first set: {occupied_a} cells in use; second set lit after {frames} frames, {evicted} cells evicted meanwhile"
     );
     assert!(evicted as usize >= a.len() / 2, "{evicted} evicted");
-    // The first set's cells went: unmarked reads find nothing.
+    // The first set's cells went: the least recently read past half the
+    // slots, the rest once no reader marked them for the eviction's age.
+    // Unmarked reads find nothing.
     h.read_cache(a.clone(), false);
-    h.frames(1);
+    h.frames(EVICT_AGE as usize + 2);
     let reads = h.cache_reads();
     let found = reads.iter().filter(|r| r.level.is_some()).count();
     assert_eq!(

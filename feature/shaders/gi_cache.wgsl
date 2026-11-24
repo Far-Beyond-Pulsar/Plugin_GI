@@ -516,6 +516,8 @@ fn cache_fold(@builtin(global_invocation_id) id: vec3<u32>) {
     let normal = scene_unpack_unit(e.normal);
     // (0: no ray went low that way this update.)
     var clear = array<f32, RADIANCE_CACHE_WAYS>();
+    // A low ray met a surface that lets light through that way (below).
+    var clutter = array<bool, RADIANCE_CACHE_WAYS>();
     // A ray that met an inside within a few of its start's offsets started
     // in a solid: the cell's point, kept to a 32768th of its cell, fell behind
     // a surface next to the one it is on (a corner's). Neither it nor its
@@ -534,7 +536,22 @@ fn cache_fold(@builtin(global_invocation_id) id: vec3<u32>) {
         // A ray that goes low (below 45 degrees over the cell's surface)
         // explores its way: a hit bounds it (a wall standing there), a miss
         // leaves it open. A ray higher up says nothing of the surface (a
-        // ceiling over a floor is no occluder along it). The bound is where
+        // ceiling over a floor is no occluder along it). Nor does a hit on
+        // the cell's own clutter, which bounded nearly every way in a forest
+        // or a meadow a few centimetres from each cell's point and sent the
+        // reads there to finer cells (on voxel_craft 60% of the new cells a
+        // frame, and a table at its load whatever its size):
+        // - relief: a hit within the cell's layer of its plane, farther along
+        //   the surface than a layer (a step, a stone: what the slab
+        //   prefilters). It says nothing: a ray higher up that way meets a
+        //   wall standing there and bounds it, or passes over the relief and
+        //   opens it. (Nearer than a layer every low ray meets a wall's foot
+        //   within the layer, so such a hit still bounds.)
+        // - a surface that lets light through (a leaf, a blade of grass):
+        //   the light reaches past it through it, and the cell's rays average
+        //   its shade with the rest of the cell's surroundings. It opens a
+        //   way no ray has explored yet and otherwise leaves it as it was.
+        // The bound is where
         // the plane of the face it met crosses the cell's surface, no farther
         // than the hit: a way is 45 degrees wide, and the hit of a ray off
         // its middle lies past the face's foot (up to 8% for a wall square
@@ -544,15 +561,21 @@ fn cache_fold(@builtin(global_invocation_id) id: vec3<u32>) {
         if dot(dir, normal) <= flat.y {
             let w = u32(flat.x);
             var reach = RADIANCE_CACHE_FAR;
-            if pending.t > 0.0 {
+            let hit_row = ray_surfaces[frame_gi.updated * GI_RAYS + r];
+            let layer = radiance_cache_size(e.key.tag & 31u) / f32(RADIANCE_CACHE_LAYERS);
+            let leaf = pending.t > 0.0 && any(surface_transmission(scene_surface_unpack(hit_row)) > vec3<f32>(0.0));
+            let relief = pending.t > 0.0 && dot(dir, normal) * pending.t <= layer && flat.y * pending.t > layer;
+            let own = leaf || relief;
+            clutter[w] = clutter[w] || leaf;
+            if pending.t > 0.0 && !own {
                 reach = flat.y * pending.t;
                 // The face's distance from the point, over how fast that
                 // distance changes along the cell's surface.
-                let face = scene_surface_face(ray_surfaces[frame_gi.updated * GI_RAYS + r]);
+                let face = scene_surface_face(hit_row);
                 let across = length(face - normal * dot(face, normal));
                 if across > 1e-3 { reach = min(reach, abs(dot(dir, face)) * pending.t / across); }
             }
-            clear[w] = select(min(clear[w], reach), reach, clear[w] == 0.0);
+            if !own { clear[w] = select(min(clear[w], reach), reach, clear[w] == 0.0); }
         }
         var l = scene_unpack_radiance(pending.rest);
         if pending.row != GI_NO_ROW {
@@ -589,9 +612,7 @@ fn cache_fold(@builtin(global_invocation_id) id: vec3<u32>) {
     let restart = ((counts >> 25u) & 1u) != 0u;
     let n = fold(Part(vec3<f32>(e.indirect[0], e.indirect[1], e.indirect[2]), (counts >> 8u) & 0xffu, life_test(life.indirect), restart), indirect, 0u);
     // The bounced part: the light the hits reflect of the cache's own, which
-    // follows the cells it reads; a plain mean over CACHE_BOUNCED updates,
-    // restarting with the indirect part (what lights those cells changed).
-    // The bounced part: the plain mean of its last CACHE_BOUNCED updates,
+    // follows the cells it reads: the plain mean of its last CACHE_BOUNCED updates,
     // restarting with the indirect part (what lights the cells it reads
     // changed) or with its own change test (those cells still converging:
     // a part whose level moves is not settled).
@@ -606,13 +627,14 @@ fn cache_fold(@builtin(global_invocation_id) id: vec3<u32>) {
     // bound 1.3 times its wall's distance three updates in four, and a
     // reader that far past a thin wall read the lit side's cell); one never
     // explored stays unexplored (0: a reader's light holds there only near
-    // the cell's point, `radiance_cache_holds`).
+    // the cell's point, `radiance_cache_holds`), unless a surface that lets
+    // light through opened it (above).
     var kept = array<f32, RADIANCE_CACHE_WAYS>();
     for (var w = 0u; w < RADIANCE_CACHE_WAYS; w++) {
         let old = select(radiance_cache_clear(e, w), 0.0, fresh);
         let grown = min(old * CACHE_CLEAR_GROWTH, RADIANCE_CACHE_FAR);
         if clear[w] == 0.0 {
-            kept[w] = old;
+            kept[w] = select(old, RADIANCE_CACHE_FAR, clutter[w] && old == 0.0);
         } else if old == 0.0 {
             kept[w] = clear[w];
         } else {
