@@ -7,7 +7,7 @@
 use helio_frame_api::denoise::TraceBlock;
 use helio_settings::{choice, integer, number, pick, toggle, Choice, Group, Resolved};
 
-use crate::cache::{CacheConfig, DEFAULT_RAYS, DEFAULT_SLOTS_LOG2};
+use crate::cache::{CacheConfig, DEFAULT_CELL_ANGLE, DEFAULT_RAYS, DEFAULT_SLOTS_LOG2};
 use crate::gather::GatherConfig;
 use crate::GiConfig;
 
@@ -75,7 +75,7 @@ pub struct GiSettings {
     pub probe_spacing: Option<f32>,
     /// The radiance cache's slots, as a power of two (12 to 24), or `None`
     /// for the default ([`DEFAULT_SLOTS_LOG2`]: 2^18, 40.5 MiB). A larger
-    /// cache holds finer cells (`CacheConfig::eye_angle`); a frame's work
+    /// cache holds more cells before the least recently read give way; a frame's work
     /// follows the cells in use, not the slots.
     pub cache_slots_log2: Option<u32>,
     /// The most rays a frame the radiance cache spends lighting its cells, or
@@ -84,6 +84,12 @@ pub struct GiSettings {
     /// larger cap converges a moving view's cells sooner; a settled scene
     /// spends the refresh alone.
     pub cache_rays: Option<u32>,
+    /// The radiance cache's cells' angle seen from the eye, milliradians (5
+    /// to 500), or `None` for the slots' own (`CacheConfig::eye_angle`,
+    /// 40 mrad at the default slots): a cell is about that share of its
+    /// distance wide. Finer cells hold finer
+    /// light for more cells in use (more slots, more of the budget).
+    pub cache_cell_angle: Option<u32>,
     /// What the indirect diffuse at a pixel is: the probes', or the pixels'
     /// gather at a ray budget ([`GiQuality`]).
     pub quality: GiQuality,
@@ -99,6 +105,7 @@ impl Default for GiSettings {
             probe_spacing: None,
             cache_slots_log2: None,
             cache_rays: None,
+            cache_cell_angle: None,
             quality: GiQuality::DEFAULT,
             pixel_reuse: true,
         }
@@ -115,6 +122,7 @@ impl GiSettings {
             cache: CacheConfig::new(
                 self.cache_slots_log2.unwrap_or(DEFAULT_SLOTS_LOG2),
                 self.cache_rays.unwrap_or(DEFAULT_RAYS),
+                self.cache_cell_angle.unwrap_or(DEFAULT_CELL_ANGLE),
             ),
             pixels: match self.quality {
                 GiQuality::Probes => None,
@@ -163,6 +171,16 @@ pub static GI: Group = Group {
             "The most rays a frame the radiance cache spends lighting surfaces, by need (1024 \
              up; more converge a moving view's cells sooner); 0: the default, 32768",
         ),
+        integer(
+            "radiance_cache_cell_angle",
+            "Radiance Cache Cell Angle",
+            "Global Illumination",
+            (0, 500),
+            0,
+            "How wide the radiance cache's cells are seen from the eye, in milliradians (5 to \
+             500; a cell is that share of its distance wide: finer cells hold finer bounce \
+             light for more cells in use); 0: the slots' own (40 at the default size)",
+        ),
         pick(
             "quality",
             "GI Quality",
@@ -193,6 +211,9 @@ impl GiSettings {
             probe_spacing: settings.optional("probe_spacing").map(|m| m as f32),
             cache_slots_log2: settings.optional("radiance_cache_slots").map(|n| n as u32),
             cache_rays: settings.optional("radiance_cache_rays").map(|n| n as u32),
+            cache_cell_angle: settings
+                .optional("radiance_cache_cell_angle")
+                .map(|n| n as u32),
             quality: GiQuality::from_key(settings.text("quality")).unwrap_or(GiQuality::DEFAULT),
             pixel_reuse: settings.bool("pixel_reuse"),
         }
@@ -257,6 +278,7 @@ mod tests {
             "probe_spacing" => Some(helio_settings::Value::Number(2.0)),
             "radiance_cache_slots" => Some(helio_settings::Value::Number(20.0)),
             "radiance_cache_rays" => Some(helio_settings::Value::Number(65536.0)),
+            "radiance_cache_cell_angle" => Some(helio_settings::Value::Number(60.0)),
             _ => None,
         });
         let gi = GiSettings::from_settings(&settings);
@@ -265,7 +287,8 @@ mod tests {
             gi.config().cache,
             CacheConfig {
                 slots: 1 << 20,
-                rays: 65536
+                rays: 65536,
+                cell_angle: 60
             }
         );
         assert_eq!(GiSettings::default().config().cache, CacheConfig::default());

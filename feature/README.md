@@ -273,10 +273,13 @@ reflections). GI publishes it (`cache.rs`, `gi_cache.wgsl`):
 - **Each frame** (`RadianceCache`: `cache_begin`, `cache_scan`,
   `cache_plan`, `cache_select`, `cache_end`, `cache_rays`): the cells' ages
   and needs into histograms; evicted, the cells no reader marked for 128
-  frames and, past half the slots, the least recently used but never one
-  marked within 64 frames (past the probes' longest period); lit by need,
-  `rays / 4` cells at most: never lit, a part restarting, the refresh (each
-  cell once in 21 frames, the finest probes' period), then those still
+  frames and, past half the slots, the least recently read, exactly as many
+  as the cells in use exceed it by, never one marked this frame or the last
+  (a working set larger than the slots churns; it never turns new keys away
+  for good); lit by need, `rays / 4` cells at most: never lit, a part
+  restarting, the refresh (each cell once in `max(21, cells / (rays / 4))`
+  frames: the finest probes' period, longer where the cells in use
+  outnumber that many frames' budget), then those still
   converging, the least of their history first. A settled static scene
   spends the refresh alone. 4 rays a lit cell, cosine-distributed about its
   normal in a 2x2 set of jittered strata, from no width spreading by
@@ -304,8 +307,11 @@ reflections). GI publishes it (`cache.rs`, `gi_cache.wgsl`):
   `pixels`; states `cache`, `absent`, `new`, `unexplored`, `occluded`,
   and `far_own`: a far side lit by the reader's own light sample).
 - **Settings** (`GiSettings`, host group `gi`): `radiance_cache_slots`
-  (2^12 to 2^24, default 2^18: about 162 bytes a slot, 40.5 MiB) and
-  `radiance_cache_rays` (the most a frame, default 32,768). Where each
+  (2^12 to 2^24, default 2^18: about 162 bytes a slot, 40.5 MiB),
+  `radiance_cache_rays` (the most a frame, default 32,768) and
+  `radiance_cache_cell_angle` (milliradians, 5 to 500; by default the
+  slots' own, `sqrt(4 pi 17 / (slots / 2))`: 40 at 2^18, a cell 52 pixels
+  wide at 1080p under a 45 degree field of view). Where each
   constant comes from: `cache.rs`'s module docs.
 
 ## The pixels' gather

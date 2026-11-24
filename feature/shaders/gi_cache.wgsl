@@ -66,7 +66,9 @@
 
 // Cells lit a frame at most (the ray budget over CACHE_RAYS).
 override CACHE_CELLS: u32 = 8192u;
-// Frames between two updates of a settled cell (`cache::refresh_period`).
+// Frames between two updates of a settled cell at least
+// (`cache::refresh_period`); a full refresh of the cells in use takes
+// cells / CACHE_CELLS frames, so the period is the longer (PLAN_REFRESH).
 override CACHE_REFRESH: u32 = 21u;
 // The frame's statistics.
 override CACHE_STAT_CELLS: u32 = 0u;
@@ -86,10 +88,11 @@ const CACHE_ERROR: f32 = 0.03;
 const CACHE_BOUNCED: u32 = 16u;
 // Frames unused before a cell goes (`cache::EVICT_AGE`), as a histogram
 // bin: ages 128 to 255. Past half the slots, the least recently used go too,
-// but never a cell marked within half that (ages under 64, bin 7 and up go):
-// longer than any reader goes between two reads of a cell it keeps reading.
+// whole bins from the oldest, down to cells read two frames ago (bin 2,
+// ages 2 and 3) if the cells in use need it: never one marked this frame or
+// the last, whose readers' reads this frame are on their way.
 const CACHE_EVICT_BIN: u32 = 8u;
-const CACHE_REVISIT_BIN: u32 = 7u;
+const CACHE_RECENT_BIN: u32 = 2u;
 // The fold's change test (`cache.rs`): a fast (CACHE_FAST updates) and a
 // slow (the history's) mean of each update's luminance, clamped from above at
 // the fast mean plus CACHE_CLAMP mean absolute deviations, apart by more than
@@ -120,6 +123,12 @@ const PLAN_KEPT_BEFORE: u32 = 72u;
 const PLAN_KEPT: u32 = 73u;
 const PLAN_NEW: u32 = 74u;
 const PLAN_SETTLED: u32 = 75u;
+const PLAN_REFRESH: u32 = 76u;
+// The bin of used age evicted in part (past half the slots), how many of its
+// cells go, and how many went so far.
+const PLAN_EVICT_PART: u32 = 77u;
+const PLAN_EVICT_SHARE: u32 = 78u;
+const PLAN_EVICT_TAKEN: u32 = 79u;
 
 // The need bins (`need_bin`).
 const NEED_NEW: u32 = 31u;
@@ -189,7 +198,7 @@ fn life_settled(life: CacheLife) -> bool {
 
 // How much cell `s` (its life `life`) needs light this frame, a bin (high
 // first): never lit; a part restarts (its light changed); its refresh
-// (every CACHE_REFRESH frames, spread over the frames by its slot, settled
+// (every PLAN_REFRESH frames, spread over the frames by its slot, settled
 // or not: a change no reader's frame shows is found, and a cell the
 // converging ones crowd out still takes an update); a cell still
 // converging, by the share of its history it holds (least first); 0: none.
@@ -198,7 +207,7 @@ fn need_bin(s: u32, life: CacheLife) -> u32 {
     // (`RADIANCE_CACHE_UNSEATED`: its rays have nowhere to start from).
     if life.lit == 0u { return select(NEED_NEW, 0u, radiance_cache_entries[s].point == RADIANCE_CACHE_UNSEATED); }
     if (life.counts >> 24u) != 0u { return NEED_RESTART; }
-    let turn = (radiance_cache_frame.origin_z.w + radiance_cache_mix(s)) % CACHE_REFRESH;
+    let turn = (radiance_cache_frame.origin_z.w + radiance_cache_mix(s)) % atomicLoad(&cache_plan[PLAN_REFRESH]);
     if turn == 0u { return NEED_REFRESH; }
     let held = life_held(life);
     if held >= CACHE_SETTLED { return 0u; }
@@ -221,6 +230,9 @@ fn cache_begin() {
     atomicStore(&cache_plan[PLAN_ITEMS], items);
     atomicStore(&cache_plan[PLAN_KEPT_BEFORE], kept);
     atomicStore(&cache_plan[PLAN_NEW], queued);
+    // The refresh's period: a full refresh of the cells in use within the
+    // budget, never shorter than the finest probes' period.
+    atomicStore(&cache_plan[PLAN_REFRESH], max(CACHE_REFRESH, (kept + CACHE_CELLS - 1u) / CACHE_CELLS));
     cache_args[0] = (items + 63u) / 64u;
     cache_args[1] = 1u;
     cache_args[2] = 1u;
@@ -262,18 +274,32 @@ fn cache_scan(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invoc
 @compute @workgroup_size(1)
 fn cache_plan_main() {
     // What goes: unused for CACHE_EVICT_AGE frames; past half the slots, the
-    // least recently used too (whole bins, never those a reader may still
-    // come back to: CACHE_REVISIT_BIN), so a new cell's bucket keeps room.
+    // least recently used too (whole bins, never those marked this frame or
+    // the last: CACHE_RECENT_BIN), so a new cell's bucket keeps room.
     var evict = CACHE_EVICT_BIN;
     var kept = 0u;
     for (var b = 0u; b < CACHE_EVICT_BIN; b++) { kept += atomicLoad(&cache_plan[32u + b]); }
     let load = radiance_cache_frame.origin_z.z / 2u;
-    while kept > load && evict > CACHE_REVISIT_BIN {
+    // Whole bins from the oldest while the next one's cells are all excess,
+    // then that many of the bin the excess ends in (the least recently read
+    // of the cells in use go, never more than the excess).
+    var part = 32u;
+    var share = 0u;
+    while kept > load && evict > CACHE_RECENT_BIN {
+        let here = atomicLoad(&cache_plan[32u + evict - 1u]);
+        if kept - here < load {
+            part = evict - 1u;
+            share = kept - load;
+            kept = load;
+            break;
+        }
         evict -= 1u;
-        kept -= atomicLoad(&cache_plan[32u + evict]);
+        kept -= here;
     }
-    var evicted = 0u;
+    var evicted = share;
     for (var b = evict; b < 32u; b++) { evicted += atomicLoad(&cache_plan[32u + b]); }
+    atomicStore(&cache_plan[PLAN_EVICT_PART], part);
+    atomicStore(&cache_plan[PLAN_EVICT_SHARE], share);
     // What is lit: whole bins from the most in need down, then a share of
     // the bin the budget ends in; bin 0 never.
     var left = CACHE_CELLS;
@@ -305,7 +331,11 @@ fn cache_select(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_inv
     var keep = false;
     if s != RADIANCE_CACHE_NONE {
         let used = age_bin(radiance_cache_frame.origin_z.w - atomicLoad(&radiance_cache_slots[s].used));
-        if used >= atomicLoad(&cache_plan[PLAN_EVICT]) {
+        var goes = used >= atomicLoad(&cache_plan[PLAN_EVICT]);
+        if !goes && used == atomicLoad(&cache_plan[PLAN_EVICT_PART]) {
+            goes = atomicAdd(&cache_plan[PLAN_EVICT_TAKEN], 1u) < atomicLoad(&cache_plan[PLAN_EVICT_SHARE]);
+        }
+        if goes {
             atomicStore(&radiance_cache_slots[s].state, 0u);
             cache_life[s] = CacheLife(0u, 0u, array<f32, 3>(0.0, 0.0, 0.0), array<f32, 3>(0.0, 0.0, 0.0), array<f32, 3>(0.0, 0.0, 0.0), 0u);
         } else {

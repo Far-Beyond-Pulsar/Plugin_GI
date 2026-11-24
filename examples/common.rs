@@ -634,7 +634,7 @@ pub fn features() -> helio_feature_api::FeatureSet {
 /// The deferred preset with the lighting plugins' features.
 /// GI's settings `settings` with an A/B run's choice of GI over them:
 /// `HELIO_GI_QUALITY` (`probes`, `pixels_16`, `pixels_4`, `pixels_1`: the
-/// `gi` group's `quality`) and `HELIO_GI_PIXEL_REUSE=0` (no sample reuse).
+/// `gi` group's `quality`) and `HELIO_GI_PIXEL_REUSE=0` (no sample reuse) and `HELIO_GI_CELL_ANGLE` (the radiance cache's cell angle, milliradians).
 pub fn gi_settings(mut settings: helio_pass_gi::GiSettings) -> helio_pass_gi::GiSettings {
     if let Ok(quality) = std::env::var("HELIO_GI_QUALITY") {
         settings.quality = helio_pass_gi::GiQuality::from_key(&quality)
@@ -642,6 +642,13 @@ pub fn gi_settings(mut settings: helio_pass_gi::GiSettings) -> helio_pass_gi::Gi
     }
     if let Ok(reuse) = std::env::var("HELIO_GI_PIXEL_REUSE") {
         settings.pixel_reuse = reuse != "0";
+    }
+    if let Ok(angle) = std::env::var("HELIO_GI_CELL_ANGLE") {
+        settings.cache_cell_angle = Some(
+            angle
+                .parse()
+                .unwrap_or_else(|_| panic!("HELIO_GI_CELL_ANGLE: not milliradians `{angle}`")),
+        );
     }
     settings
 }

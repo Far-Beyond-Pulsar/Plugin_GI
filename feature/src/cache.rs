@@ -78,14 +78,30 @@
 //!   coarser levels is updated every 41 frames), so no cell a reader still
 //!   uses goes; past half the slots the least recently used go too, keeping
 //!   buckets' room (a bucket of 16 at half load is full for 0.4% of keys),
-//!   but never one marked within half that (64 frames, still past the
-//!   probes' longest period): a still camera's readers come back to every
-//!   cell they read, so the working set holds still.
-//! - The eye angle ([`CacheConfig::eye_angle`]): cells at least `a * d` wide
-//!   at a distance `d` from the eye hold at most `4 pi / a^2` cells a level
-//!   for surfaces all around the eye; over the levels that is half the
-//!   slots: `a = sqrt(4 pi LEVELS / (slots / 2))`, 0.040 rad at the default
-//!   2^18 slots. A larger cache resolves finer cells.
+//!   down to those read in the last two frames if the cells in use need it:
+//!   a working set larger than the slots degrades by evicting the least
+//!   recently read, never by turning new keys away for good (a floor at 64
+//!   frames, past the probes' longest period, kept a full table full: on
+//!   voxel_craft 45% of every reader's hits found no cell).
+//! - The eye angle ([`CacheConfig::eye_angle`], a setting in
+//!   milliradians): a surface point's cell is about `a * d` wide at its
+//!   distance `d` from the eye. A cell is a prefilter of the light a diffuse
+//!   bounce gathers there, so it needs no finer than its readers resolve, and
+//!   next to an occluder a read already goes finer
+//!   (`RADIANCE_CACHE_DESCENT`). By default it is the slots' angle: cells at
+//!   least `a * d` wide hold at most `4 pi / a^2` cells a level for surfaces
+//!   all around the eye, over the levels half the slots, so `a = sqrt(4 pi
+//!   LEVELS / (slots / 2))` (0.040 rad at the default 2^18 slots, a cell 52
+//!   pixels wide at 1080p under a 45 degree field of view, 31 under 70). A
+//!   coarser angle at the default slots moved the cathedral's error against
+//!   its reference beyond the runs' noise (rendering.md, "The cache's
+//!   resolution"), and a finer one than the slots hold churns them. What
+//!   the cells in use outgrow, the least recently read give way to (eviction
+//!   below).
+//! - The refresh ([`refresh_period`] frames at least): a full refresh of
+//!   the cells in use takes `cells / budget` frames, so its period is the
+//!   longer of the two, from the last frame's cells in use (`cache_begin`).
+//!   The budget is the cap.
 
 use std::sync::Arc;
 
@@ -133,8 +149,13 @@ pub const FLOOR: f32 = 0.01;
 pub const DETECT: u32 = 8;
 /// Frames unused before a cell goes.
 pub const EVICT_AGE: u32 = 128;
+/// Past half the slots, the least recently read cells go down to this age
+/// (frames since their last mark): never one marked this frame or the last.
+pub const RECENT_AGE: u32 = 2;
 /// The default slots (log2) and ray budget (rays a frame).
 pub const DEFAULT_SLOTS_LOG2: u32 = 18;
+/// The eye angle that means the slots' own (module docs).
+pub const DEFAULT_CELL_ANGLE: u32 = 0;
 /// Rays a frame by default: at the load the eviction keeps (half the
 /// default slots, 2^17 cells) every cell lit at least once in the time the
 /// probes that read it take to come round (the finest levels' 21 frames,
@@ -147,9 +168,11 @@ pub fn probe_period() -> u32 {
     helio_gi_api::LEVEL_PROBES.div_ceil(helio_gi_api::LEVEL_UPDATES[0] as u32)
 }
 
-/// Frames between two updates of a settled cell (module docs): the finest
-/// probes' period, so a change of light no reader's frame shows reaches the
-/// probes that read the cell within about one of their own cycles.
+/// Frames between two updates of a settled cell at least (module docs):
+/// the finest probes' period, so a change of light no reader's frame shows
+/// reaches the probes that read the cell within about one of their own
+/// cycles; longer where the cells in use outnumber that many frames'
+/// budget.
 pub fn refresh_period() -> u32 {
     probe_period()
 }
@@ -173,6 +196,9 @@ pub struct CacheConfig {
     pub slots: u32,
     /// Rays a frame the cache spends lighting its cells (a multiple of 64).
     pub rays: u32,
+    /// The eye angle, milliradians, or [`DEFAULT_CELL_ANGLE`] for the
+    /// slots' own ([`Self::eye_angle`]).
+    pub cell_angle: u32,
 }
 
 impl Default for CacheConfig {
@@ -180,17 +206,24 @@ impl Default for CacheConfig {
         Self {
             slots: 1 << DEFAULT_SLOTS_LOG2,
             rays: DEFAULT_RAYS,
+            cell_angle: DEFAULT_CELL_ANGLE,
         }
     }
 }
 
 impl CacheConfig {
     /// A cache of `2^slots_log2` slots (12 to 24) spending `rays` rays a
-    /// frame (1024 up, rounded to 64).
-    pub fn new(slots_log2: u32, rays: u32) -> Self {
+    /// frame (1024 up, rounded to 64), its cells `cell_angle` milliradians
+    /// seen from the eye (5 to 500; [`DEFAULT_CELL_ANGLE`]: the slots' own).
+    pub fn new(slots_log2: u32, rays: u32, cell_angle: u32) -> Self {
         Self {
             slots: 1 << slots_log2.clamp(12, 24),
             rays: rays.clamp(1024, 1 << 20).next_multiple_of(64),
+            cell_angle: if cell_angle == DEFAULT_CELL_ANGLE {
+                DEFAULT_CELL_ANGLE
+            } else {
+                cell_angle.clamp(5, 500)
+            },
         }
     }
 
@@ -199,9 +232,12 @@ impl CacheConfig {
         self.rays / RAYS_PER_CELL
     }
 
-    /// The eye angle (module docs).
+    /// The eye angle, radians (module docs).
     pub fn eye_angle(&self) -> f32 {
-        (4.0 * std::f32::consts::PI * LEVELS as f32 / (self.slots as f32 / 2.0)).sqrt()
+        if self.cell_angle == DEFAULT_CELL_ANGLE {
+            return (4.0 * std::f32::consts::PI * LEVELS as f32 / (self.slots as f32 / 2.0)).sqrt();
+        }
+        self.cell_angle as f32 * 1e-3
     }
 
     /// Bytes the cache holds: its slots and the new cells' queue, entries
@@ -711,8 +747,8 @@ mod tests {
             ("CACHE_SPREAD", format!("{SPREAD}")),
             ("CACHE_CLEAR_GROWTH", format!("{CLEAR_GROWTH}")),
             (
-                "CACHE_REVISIT_BIN",
-                format!("{}u", (EVICT_AGE / 2).trailing_zeros() + 1),
+                "CACHE_RECENT_BIN",
+                format!("{}u", RECENT_AGE.trailing_zeros() + 1),
             ),
         ] {
             assert!(
@@ -761,10 +797,6 @@ mod tests {
             EVICT_AGE >= 2 * period && EVICT_AGE.is_power_of_two(),
             "{period}"
         );
-        assert!(EVICT_AGE / 2 < 2 * period);
-        // The default eye angle.
-        let a = CacheConfig::default().eye_angle();
-        assert!((a - 0.0404).abs() < 1e-3, "{a}");
         // The default budget lights half the default slots' cells, 4 rays
         // each, within a finest probe's period.
         let at_load = (1u32 << DEFAULT_SLOTS_LOG2) / 2 * RAYS_PER_CELL / probe_period();
@@ -780,10 +812,17 @@ mod tests {
 
     #[test]
     fn a_config_is_clamped_to_what_the_hash_and_the_stream_take() {
-        let c = CacheConfig::new(4, 100);
-        assert_eq!((c.slots, c.rays), (1 << 12, 1024));
-        let c = CacheConfig::new(30, 5000);
-        assert_eq!((c.slots, c.rays), (1 << 24, 5056));
-        assert_eq!(CacheConfig::new(18, 1 << 15), CacheConfig::default());
+        let c = CacheConfig::new(4, 100, 1);
+        assert_eq!((c.slots, c.rays, c.cell_angle), (1 << 12, 1024, 5));
+        // The slots' own angle by default: 0.040 rad at 2^18 slots.
+        let a = CacheConfig::default().eye_angle();
+        assert!((a - 0.0404).abs() < 1e-3, "{a}");
+        assert!((CacheConfig::new(18, 1 << 15, 40).eye_angle() - 0.040).abs() < 1e-6);
+        let c = CacheConfig::new(30, 5000, 900);
+        assert_eq!((c.slots, c.rays, c.cell_angle), (1 << 24, 5056, 500));
+        assert_eq!(
+            CacheConfig::new(18, 1 << 15, DEFAULT_CELL_ANGLE),
+            CacheConfig::default()
+        );
     }
 }
