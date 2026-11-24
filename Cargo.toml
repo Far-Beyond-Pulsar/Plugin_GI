@@ -1,6 +1,6 @@
 [package]
 name = "gi_plugin"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 publish = false
 description = "Global Illumination (`pulsar.gi`): the plugin's root crate, the one place it registers everything it contributes (runtime registrations always, the editor's with `editor`)"
@@ -8,12 +8,17 @@ description = "Global Illumination (`pulsar.gi`): the plugin's root crate, the o
 autoexamples = false
 
 [features]
+# The plugin as a library of its own, loaded by the editor from plugins/editor:
+# cargo build -p <this package> --release --features dll
+dll = ["editor", "dep:plugin_editor_api", "plugin_editor_api/editor", "plugin_editor_api/shared-dylibs"]
 # Nothing: GI registers no editor UI (the project settings window edits its
 # settings group). Hosts turn it on with the rest of the installed set's
 # editor registrations.
 editor = []
 
 [dependencies]
+# The plugin library's editor plugin entry point (feature `dll`).
+plugin_editor_api = { workspace = true, optional = true }
 # The plugin gate and the registrations' collection.
 pulsar_plugins = { workspace = true }
 # The plugin's feature crate.
@@ -36,3 +41,7 @@ pollster = "=0.4.0"
 
 [lints]
 workspace = true
+
+# Also the plugin as a library of its own (feature `dll`, loaded by the editor).
+[lib]
+crate-type = ["cdylib", "rlib"]

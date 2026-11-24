@@ -18,6 +18,7 @@ use helio::{
     RendererBuilder, RendererConfig,
 };
 use helio_mats::host_rows::MaterialComponent;
+use helio_mesh_host::ray_proxies::{VgRayProxySettings, VirtualGeometryMesh};
 use helio_mesh_host::ray_tracing::SceneDbRayTracing;
 use helio_mesh_host::{MeshComponent, StaticObjectComponent};
 use helio_pass_gi::{Clipmap, GiPass, LEVEL_PROBES, PROBE_WORDS};
@@ -223,8 +224,8 @@ fn card(n: u32) -> (Vec<Vec3>, Vec<u32>) {
 }
 const CARD_CONTENT: u128 = 0x5647_5241_5950_524f_5859_4341_5244_0001;
 
-/// The VG wall's object: a zero-area placeholder mesh whose interned vertex
-/// range `runtime` knows as the wall's asset.
+/// The VG wall's object: a zero-area placeholder mesh marked as the wall's
+/// asset (`VirtualGeometryMesh`), the content id `runtime` knows it by.
 fn spawn_vg_wall(
     world: &mut World,
     runtime: &VgRuntime,
@@ -255,9 +256,8 @@ fn spawn_vg(
             indices: vec![0, 1, 2],
         },
     );
-    let store = world.gpu_mirror().cloned().unwrap();
-    let range = MeshComponent::vertices_gpu_handle(store.store(), mesh.index()).unwrap();
-    runtime.request_asset(content, range.offset, range.count, vgeo);
+    world.insert(mesh, VirtualGeometryMesh { content });
+    runtime.request_asset(content, vgeo);
     place(
         world,
         mesh,
@@ -671,6 +671,51 @@ fn a_vg_wall_blocks_probe_and_shadow_rays_through_its_proxy() {
     assert!(error.is_none(), "{error:?}");
 }
 
+/// The proxies' error bound is authoritative and their memory is budgeted
+/// scene-wide (#2047): a proxy built at its bound that does not fit the
+/// budget is not traced, and that shows in the stats, never as a coarser
+/// cut. With room in the budget again it is built and admitted.
+#[test]
+fn a_proxy_over_the_scene_budget_is_reported_not_coarsened() {
+    let Some(mut harness) = Harness::new(true, |world, runtime| {
+        room(world, true);
+        spawn_vg_wall(world, runtime, [0.7; 3], 0.0);
+    }) else {
+        return;
+    };
+    let tight = VgRayProxySettings {
+        budget_bytes: 1024,
+        ..VgRayProxySettings::default()
+    };
+    harness.rays.set_vg_proxy_settings(tight);
+    let start = std::time::Instant::now();
+    let stats = loop {
+        harness.prepare();
+        let stats = harness.rays.vg_stats();
+        if stats.over_budget > 0 || stats.proxies > 0 {
+            break stats;
+        }
+        assert!(
+            stats.failed == 0 && start.elapsed().as_secs() < 60,
+            "the wall's proxy never arrived: {stats:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
+    eprintln!("over budget: {stats:?}");
+    assert_eq!((stats.proxies, stats.over_budget), (0, 1), "{stats:?}");
+    assert!(stats.over_budget_bytes > tight.budget_bytes);
+    assert_eq!(stats.live_bytes, 0);
+    assert_eq!(stats.budget_bytes, tight.budget_bytes);
+
+    // A budget it fits: rebuilt at the same bound, and traced.
+    harness
+        .rays
+        .set_vg_proxy_settings(VgRayProxySettings::default());
+    harness.wait_for_proxy();
+    let stats = harness.rays.vg_stats();
+    assert_eq!((stats.proxies, stats.over_budget), (1, 0), "{stats:?}");
+}
+
 /// A proxy hit is shaded as its object's material: an emissive VG wall in
 /// an unlit room lights the probes around it.
 #[test]
@@ -884,9 +929,8 @@ fn measure_proxy_memory_and_tlas_rebuild() {
                 indices: vec![0, 1, 2],
             },
         );
-        let store = world.gpu_mirror().cloned().unwrap();
-        let range = MeshComponent::vertices_gpu_handle(store.store(), mesh.index()).unwrap();
-        runtime.request_asset(SCAN, range.offset, range.count, scan.clone());
+        world.insert(mesh, VirtualGeometryMesh { content: SCAN });
+        runtime.request_asset(SCAN, scan.clone());
         let stone = material(world, [0.6; 3], 0.0);
         for z in 0..ROWS {
             for x in 0..ROWS {
