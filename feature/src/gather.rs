@@ -84,7 +84,7 @@ pub const SPATIAL_RADIUS: f32 = 3.0;
 pub const OCCLUSION_START: f32 = 0.002;
 
 /// A reservoir's bytes (`GatherReservoir`).
-pub const RESERVOIR_BYTES: u64 = 32;
+pub const RESERVOIR_BYTES: u64 = 36;
 /// A texel's hit light's bytes (`GatherHitLight`).
 const HIT_LIGHT_BYTES: u64 = 16;
 
@@ -1787,5 +1787,116 @@ mod tests {
             "const CACHE_NOISE: f32 = {:.8};",
             1.0f64 / 32f64.sqrt()
         )));
+    }
+
+    /// A reservoir packed and unpacked keeps its sample's estimate at its
+    /// receiver (radiance 1: pi times it, the cosine sampling's) however far
+    /// the receiver is from the eye, for a hit three ray offsets away rising
+    /// from the receiver's plane at a third or a thirtieth (a voxel step's
+    /// riser, a corner). With the receiver packed as a direction from the
+    /// eye at 16 bits an axis it was 0.67 at 25 m (a third) and none of it
+    /// from there on (on voxel ground, as often many times it: bright
+    /// discs). Runs the gather's own functions on the GPU.
+    #[test]
+    fn a_packed_reservoir_keeps_its_estimate_at_any_distance() {
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
+        let Ok(adapter) =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+        else {
+            eprintln!("no adapter: skipped");
+            return;
+        };
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+        let kernel = r"
+@group(0) @binding(99) var<storage, read_write> packed_check_out: array<vec4<f32>>;
+
+@compute @workgroup_size(1)
+fn packed_check(@builtin(global_invocation_id) id: vec3<u32>) {
+    let distance = 2.5 * pow(10.0, f32(id.x / 2u));
+    let x = normalize(vec3<f32>(0.31, -0.42, 0.85)) * distance;
+    let n = normalize(vec3<f32>(0.12, 1.0, 0.07));
+    let along = normalize(cross(n, vec3<f32>(0.0, 0.0, 1.0)));
+    let off = gi_ray_offset(x);
+    var f = no_res();
+    f.valid = true;
+    f.receiver = x;
+    f.normal = n;
+    f.sample = x + (along + select(0.3, 0.03, (id.x & 1u) != 0u) * n) * (3.0 * off);
+    f.sample_normal = -along;
+    f.m = 1.0;
+    f.radiance = scene_pack_radiance(vec3<f32>(1.0));
+    f.weight = PI / geometry(x, n, f);
+    let eye = vec3<f32>(0.0);
+    let packed = res_unpack(res_pack(f, eye), eye);
+    packed_check_out[id.x] = vec4<f32>(distance, geometry(x, n, packed) * packed.weight / PI, off, 0.0);
+}
+";
+        let source =
+            helio_core::shader::resolve_with(include_str!("../shaders/gi_gather.wgsl"), &SNIPPETS)
+                + kernel;
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("packed reservoir check"),
+            source: wgpu::ShaderSource::Wgsl(source),
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("packed reservoir check"),
+            layout: None,
+            module: &module,
+            entry_point: Some("packed_check"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        const CASES: u64 = 8;
+        let out = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: CASES * 16,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let read = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: CASES * 16,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[wgpu::BindGroupEntry {
+                binding: 99,
+                resource: out.as_entire_binding(),
+            }],
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, Some(&group), &[]);
+            pass.dispatch_workgroups(CASES as u32, 1, 1);
+        }
+        encoder.copy_buffer_to_buffer(&out, 0, &read, 0, CASES * 16);
+        queue.submit([encoder.finish()]);
+        read.slice(..)
+            .map_async(wgpu::MapMode::Read, |r| r.unwrap());
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        let rows: Vec<[f32; 4]> =
+            bytemuck::cast_slice(&read.slice(..).get_mapped_range().unwrap()).to_vec();
+        for (k, [distance, estimate, offset, _]) in rows.into_iter().enumerate() {
+            eprintln!(
+                "{distance} m (ray offset {offset} m): estimate over the sample's {estimate:.5}"
+            );
+            // How far the hit rises from the receiver's plane, and what the
+            // frame's f32 points resolve of that rise there (a few units in
+            // the last place of the distance); the sample's direction from
+            // its receiver is 16 bits an axis (about 3e-5 rad: a thousandth
+            // of the thirtieth's cosine).
+            let rise = if k % 2 == 0 { 0.3 } else { 0.03 } * 3.0 * offset;
+            let bound = 4e-3 + 4.0 * distance * f32::EPSILON / rise;
+            assert!(
+                (estimate - 1.0).abs() < bound,
+                "{distance} m: {estimate} (bound {bound})"
+            );
+        }
     }
 }

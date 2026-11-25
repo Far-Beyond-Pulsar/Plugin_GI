@@ -81,9 +81,9 @@ const GATHER_HAS_PREVIOUS: u32 = 1u;
 const GATHER_REUSE: u32 = 2u;
 const GATHER_TAGS: u32 = 4u;
 
-// A traced texel's reservoir, 32 bytes (`RESERVOIR_BYTES`): the receiver
-// (the traced pixel's surface) as its distance from the eye (0: none) and
-// direction (16:16 octahedral), its normal (8:8) and the luminance of the
+// A traced texel's reservoir, 36 bytes (`RESERVOIR_BYTES`): the receiver
+// (the traced pixel's surface) from the eye at the frame's own precision
+// (zero: none; `res_unpack` says why), its normal (8:8) and the luminance of the
 // cache's light at the sample when it was taken (a half: what a re-trace
 // compares); the kept sample as a direction from the receiver (16:16) and a
 // distance (below 0: the sky), its normal (12:12, the side the ray met) and
@@ -91,8 +91,9 @@ const GATHER_TAGS: u32 = 4u;
 // sends to the receiver (`scene_pack_radiance`) and its unbiased
 // contribution weight W (area measure for a point, solid angle for the sky).
 struct GatherReservoir {
-    receiver_distance: f32,
-    receiver_dir: u32,
+    receiver_x: f32,
+    receiver_y: f32,
+    receiver_z: f32,
     receiver_normal_y: u32,
     sample_dir: u32,
     sample_t: f32,
@@ -318,12 +319,23 @@ fn half_value(b: u32) -> f32 {
     return unpack2x16float(b & 0xffffu).x;
 }
 
-// `r` unpacked, its receiver held from eye `eye`.
+// `r` unpacked, its receiver held from eye `eye`. The receiver is kept as
+// the frame holds it (f32, from the eye), not as a direction and distance:
+// a sample's weight is taken at its receiver's exact point, and for a hit a
+// few of GI's ray offsets away (`gi_ray_offset`: 2 mm and 4e-6 of the
+// distance; a voxel step's riser, a corner) any receiver off by more than a
+// share of that offset changes the sample's geometry term there by orders
+// of magnitude. A direction at 16 bits an axis is up to 3e-5 of the
+// distance off, past the offset from some tens of metres: the canonical
+// estimate, the history's and a re-trace from the receiver went wrong there
+// (bright discs on voxel ground).
 fn res_unpack(r: GatherReservoir, eye: vec3<f32>) -> Res {
     var x: Res;
-    x.valid = r.receiver_distance > 0.0;
+    let v = vec3<f32>(r.receiver_x, r.receiver_y, r.receiver_z);
+    // A surface point is never the eye itself (the near plane).
+    x.valid = any(v != vec3<f32>(0.0));
     if !x.valid { return x; }
-    x.receiver = eye + scene_unpack_unit(r.receiver_dir) * r.receiver_distance;
+    x.receiver = eye + v;
     x.normal = unpack_unit8(r.receiver_normal_y);
     x.cache_y = half_value(r.receiver_normal_y >> 16u);
     let d = scene_unpack_unit(r.sample_dir);
@@ -341,9 +353,9 @@ fn res_pack(x: Res, eye: vec3<f32>) -> GatherReservoir {
     var r: GatherReservoir;
     if !x.valid { return r; }
     let v = x.receiver - eye;
-    let distance = length(v);
-    r.receiver_distance = max(distance, 1e-30);
-    r.receiver_dir = scene_pack_unit(v / max(distance, 1e-30));
+    r.receiver_x = v.x;
+    r.receiver_y = v.y;
+    r.receiver_z = v.z;
     r.receiver_normal_y = pack_unit8(x.normal) | (half_bits(x.cache_y) << 16u);
     if x.sky {
         r.sample_dir = scene_pack_unit(x.sample);

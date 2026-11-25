@@ -390,9 +390,14 @@ resolve the probes). Frame contracts only (`gather.rs`, `gi_gather.wgsl`):
    frame's surface stops pass it, `frame_surface_stops`: the denoiser's
    normal and plane stops and its walk over the depth between the two) and, where the chosen sample was taken by another receiver (the
    previous frame's, a neighbour's), a visibility ray to it into the stream
-   `gi_pixels_visibility`. The tracers answer. Reservoirs are 32 bytes:
-   the receiver as a distance and direction from the eye, normals in 8:8
-   octahedral, M and the kept cache luminance as half floats.
+   `gi_pixels_visibility`. The tracers answer. Reservoirs are 36 bytes:
+   the receiver from the eye as the frame holds it (three f32: a sample's
+   weight is taken at its receiver's exact point, and a hit a few ray
+   offsets away changes its geometry term by orders of magnitude for a
+   receiver off by more than a share of the offset, as one packed as a
+   16:16 direction was from some tens of metres: bright discs on voxel
+   ground), the sample as a 16:16 direction and a distance from it, normals
+   in 8:8 octahedral, M and the kept cache luminance as half floats.
 6. **`GiGatherSignalPass`** (`gather_signal`): the chosen sample's estimate
    times what its visibility ray lets through (an occluded reuse gives
    none), the probes' irradiance where the texel has no sample; written
