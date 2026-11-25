@@ -639,6 +639,110 @@ fn a_light_switched_off_lowers_the_confidence() {
     }
 }
 
+/// A field of blocks 12 cm wide at hashed heights (a clutter of unlike
+/// surfaces at every traced block, as a canopy's leaves are: the denoiser's
+/// surface stops find few neighbours on a pixel's own surface) in the lit
+/// room.
+fn clutter(w: &mut pulsar_scenedb::World) {
+    room(w);
+    let side = 0.12;
+    for i in 0..16u32 {
+        for j in 0..16u32 {
+            let hash = (i.wrapping_mul(73_856_093) ^ j.wrapping_mul(19_349_663))
+                .wrapping_mul(2_654_435_761);
+            let height = 0.05 + 0.35 * (hash >> 8) as f32 / 16_777_216.0;
+            spawn_box(
+                w,
+                Vec3::new(
+                    (i as f32 - 7.5) * side,
+                    0.5 * height,
+                    (j as f32 - 7.5) * side,
+                ),
+                Vec3::new(0.5 * side, 0.5 * height, 0.5 * side),
+                [0.6, 0.6, 0.5],
+            );
+        }
+    }
+}
+
+/// A pixel whose estimate rests on few samples leans on the probes, a
+/// settled one shows its own (`denoise_irradiance_with_prior`, the samples'
+/// worth the denoiser reports). The gather settled on the lit room, then
+/// the camera cut to look down on the clutter: on the frames after the cut
+/// its pixels hold no history and few neighbours on their own surface. Shown
+/// in full, their few samples change by a sample's spread from one frame to
+/// the next; leaning on the probes (a low-variance estimate, worth the
+/// deficit below a settled estimate's sixteen samples) they change by a
+/// share of it that grows with their samples, as a settled pixel's running
+/// mean does by a share of a new sample. Measured: how much the indirect
+/// diffuse changes from frame to frame (the mean relative difference of
+/// consecutive frames) over the eight frames after the cut, against the
+/// same over eight settled frames (a full history a pixel, where the prior
+/// weighs nothing).
+#[test]
+fn a_short_history_leans_on_the_probes_and_a_settled_one_shows_its_own() {
+    let cut = Camera::perspective_look_at(
+        Vec3::new(0.2, 1.6, 1.2),
+        Vec3::new(0.0, 0.0, 0.0),
+        Vec3::Y,
+        1.0,
+        1.0,
+        0.1,
+        100.0,
+    );
+    let Some(mut run) = Run::new(
+        GiQuality::Pixels(TraceBlock::Sixteen),
+        true,
+        room_camera(),
+        clutter,
+    ) else {
+        return;
+    };
+    run.settle("before the cut");
+    run.camera = cut;
+    // The mean relative difference over the pixels both images light.
+    let apart = |a: &[[f32; 4]], b: &[[f32; 4]]| -> f32 {
+        let (mut difference, mut total) = (0.0, 0.0);
+        for (p, q) in a.iter().zip(b) {
+            if p[3] < 0.999 || q[3] < 0.999 {
+                continue;
+            }
+            let (p, q) = (p[0] + p[1] + p[2], q[0] + q[1] + q[2]);
+            difference += (p - q).abs();
+            total += q;
+        }
+        difference / total.max(1e-12)
+    };
+    let changes = |run: &mut Run| -> f32 {
+        let mut images = Vec::new();
+        for _ in 0..9 {
+            run.frame();
+            images.push(run.indirect().unwrap());
+        }
+        images.windows(2).map(|w| apart(&w[1], &w[0])).sum::<f32>() / 8.0
+    };
+    let young = changes(&mut run);
+    run.settle_means("after the cut");
+    // A full history at every pixel: at a sixteenth a pixel's own samples
+    // add about a sixteenth of one a frame, the history holds 32.
+    for _ in 0..640 {
+        run.frame();
+    }
+    let settled = changes(&mut run);
+    eprintln!(
+        "frame-to-frame change: the eight frames after the cut {young:.4}, settled {settled:.4} ({:.2} times)",
+        young / settled
+    );
+    // Measured: 3.7 times the settled frames' leaning on the probes, 8.5
+    // with the few samples shown in full (the prior switched off); the
+    // bound lies halfway between.
+    assert!(settled > 0.0, "settled frames identical: nothing measured");
+    assert!(
+        young < 6.0 * settled,
+        "the frames after the cut change {young}, settled {settled}"
+    );
+}
+
 /// The near field reaches a block's footprint and no farther: the share of
 /// pixels it darkens shrinks with the block, and traced at every pixel it
 /// vanishes (nothing to move light between). It never changes a block's
