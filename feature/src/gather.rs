@@ -303,8 +303,8 @@ pub struct GiGatherPass {
     gpu: GpuGatherFrame,
     near_layout: wgpu::BindGroupLayout,
     rays_layout: wgpu::BindGroupLayout,
-    near_pipeline: wgpu::ComputePipeline,
-    rays_pipeline: wgpu::ComputePipeline,
+    near_pipeline: helio_core::shader::DeferredCompute,
+    rays_pipeline: helio_core::shader::DeferredCompute,
     cache: helio_core::gpu_cache::GpuCache,
     writes: &'static [&'static str],
 }
@@ -329,7 +329,7 @@ impl GiGatherPass {
         let module = module(device);
         // Its tile is written whole before it is read: no zeroing of the
         // workgroup's memory first (naga's is one invocation's loop).
-        let near_pipeline = helio_core::shader::create_compute_pipeline(
+        let near_pipeline = helio_core::shader::create_compute_pipeline_deferred(
             device,
             wgpu::ComputePipelineDescriptor {
                 label: Some("gather_near"),
@@ -812,7 +812,7 @@ fn dispatch(
     cmds: &mut helio_core::CommandRecorder<'_>,
     scope: &'static str,
     group: &wgpu::BindGroup,
-    stages: &[(&wgpu::ComputePipeline, [u32; 2])],
+    stages: &[(&helio_core::shader::DeferredCompute, [u32; 2])],
 ) {
     ctx.begin_gpu_scope(cmds, scope);
     {
@@ -850,8 +850,8 @@ pub struct GiGatherHitsPass {
     answer: AnswerWord,
     lighting: HitLighting,
     layout: wgpu::BindGroupLayout,
-    hits: wgpu::ComputePipeline,
-    header: wgpu::ComputePipeline,
+    hits: helio_core::shader::DeferredCompute,
+    header: helio_core::shader::DeferredCompute,
     stats: wgpu::Buffer,
     cache: helio_core::gpu_cache::GpuCache,
     reads: &'static [&'static str],
@@ -1037,8 +1037,8 @@ pub struct GiGatherShadowPass {
     answers: Arc<stream::Answers>,
     buffers: Option<(StreamBuffers, u32)>,
     layout: wgpu::BindGroupLayout,
-    shadow: wgpu::ComputePipeline,
-    header: wgpu::ComputePipeline,
+    shadow: helio_core::shader::DeferredCompute,
+    header: helio_core::shader::DeferredCompute,
     stats: wgpu::Buffer,
     cache: helio_core::gpu_cache::GpuCache,
     reads: &'static [&'static str],
@@ -1209,9 +1209,9 @@ pub struct GiGatherShadePass {
     stat: helio_core::StatSlot,
     lighting: HitLighting,
     layout: wgpu::BindGroupLayout,
-    validate: wgpu::ComputePipeline,
-    temporal: wgpu::ComputePipeline,
-    spatial: wgpu::ComputePipeline,
+    validate: helio_core::shader::DeferredCompute,
+    temporal: helio_core::shader::DeferredCompute,
+    spatial: helio_core::shader::DeferredCompute,
     cache: helio_core::gpu_cache::GpuCache,
     reads: &'static [&'static str],
     writes: &'static [&'static str],
@@ -1427,7 +1427,7 @@ pub struct GiGatherSignalPass {
     outputs: Option<([wgpu::Texture; 2], [wgpu::TextureView; 2], [u32; 2])>,
     lighting: HitLighting,
     layout: wgpu::BindGroupLayout,
-    pipeline: wgpu::ComputePipeline,
+    pipeline: helio_core::shader::DeferredCompute,
     cache: helio_core::gpu_cache::GpuCache,
     reads: &'static [&'static str],
     writes: &'static [&'static str],
