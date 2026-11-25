@@ -756,7 +756,12 @@ fn the_near_field_shrinks_with_the_block() {
         }) else {
             return;
         };
-        let near = run.until("the near field", |run| run.near_field());
+        // Once the room is drawn: its geometry binds over several frames
+        // (the asset pump's budget) and the frames before show nothing lit.
+        let near = run.until("the near field", |run| {
+            let drawn = run.indirect()?.iter().any(|p| p[3] > 0.0);
+            if drawn { run.near_field() } else { None }
+        });
         let width = (near.len() as f64 / 4.0).sqrt() as usize;
         let side = block.side() as usize;
         let mut worst = 0.0f32;
