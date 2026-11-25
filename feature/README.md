@@ -400,10 +400,20 @@ resolve the probes). Frame contracts only (`gather.rs`, `gi_gather.wgsl`):
    distance no nearer than a block's footprint.
 7. The frame's denoiser (`denoise::filter`).
 8. **`GiResolvePass`** (`gi_resolve_pixels`): the filtered irradiance at each
-   pixel's normal times its near-field factor, into `INDIRECT_DIFFUSE` in
-   its encoding; the probes' where the gather has no light yet or a remap
-   put the pixel in another space. View 37 (`GI Near Field`) shows the
-   factor.
+   pixel's normal, leaning on the probes' irradiance there where the
+   denoiser's estimate rests on fewer samples than a settled one
+   (`denoise_irradiance_with_prior`: the two weighted by the samples each
+   is worth, the probes the deficit below `denoise::SETTLED_SAMPLES` times
+   how much they hold the pixel; a settled pixel is the denoiser's alone),
+   times its near-field factor, into `INDIRECT_DIFFUSE` in its encoding;
+   the probes' where the gather has no light yet or a remap put the pixel
+   in another space. View 37 (`GI Near Field`) shows the factor. The prior
+   is applied here, after the denoiser, never in its history. Without it a
+   pixel whose history a turn, a disocclusion or sub-pixel leaves under the
+   camera's jitter cut short showed its sample or two in full: specks in
+   voxel crowns, where a sample that meets a sunlit face a centimetre away
+   is many times its block's light (Helio's `rendering.md`, section 5, "A
+   young pixel leans on a prior").
 
 GI offers `indirect_occlusion` as its rays' start off the surface (2 mm): a
 kind's own short-range term (the terrain's sky rays) keeps its minimum

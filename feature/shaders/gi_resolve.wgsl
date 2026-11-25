@@ -10,9 +10,11 @@
 // holds its irradiance / pi (rgb, half floats) and how much it holds the
 // pixel (the fourth half: 0 past the clipmap, or for the sky).
 // `gi_resolve`: the probes' irradiance. `gi_resolve_pixels`: the pixels'
-// gather (`gi_gather.wgsl`) as the frame's denoiser filtered it, times the
-// near field, the probes' where it has no light yet or a remap put the
-// pixel in another space. Its debug views show the probes (GI_PROBES_VIEW)
+// gather (`gi_gather.wgsl`) as the frame's denoiser filtered it, leaning on
+// the probes' irradiance where it rests on fewer samples than a settled
+// estimate (`denoise_irradiance_with_prior`), times the near field; the
+// probes' where it has no light yet or a remap put the pixel in another
+// space. Its debug views show the probes (GI_PROBES_VIEW)
 // or the radiance cache (RADIANCE_CACHE_VIEW).
 
 @group(0) @binding(0) var<uniform> frame_gi: GiFrame;
@@ -144,13 +146,26 @@ fn gi_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     store(at, probes_at(px));
 }
 
-// The gathered irradiance at pixel `id` (normal `n`), or below 0 where the
-// gather has no light there yet.
-fn gathered_at(id: vec2<u32>, size: vec2<u32>, n: vec3<f32>) -> vec4<f32> {
+// The gathered irradiance at pixel `id` (surface `px`), or below 0 where
+// the gather has no light there yet. The denoiser's output leans on the
+// probes' irradiance where it rests on fewer samples than a settled
+// estimate (`denoise_irradiance_with_prior`: a pixel whose history the
+// view's turn, a disocclusion or sub-pixel leaves under the camera's jitter
+// cut short would show its few samples in full, one of them a sunlit
+// surface many times its neighbours' light), as much as the probes hold the
+// pixel.
+// The probes are what the gather starts from where it has no light at all.
+fn gathered_at(id: vec2<u32>, size: vec2<u32>, px: Pixel) -> vec4<f32> {
+    let n = px.normal;
     if resolve_gather.z != 0u {
         let o0 = textureLoad(gathered0, vec2<i32>(id), 0);
         if o0.w < 0.0 { return vec4<f32>(-1.0); }
-        return vec4<f32>(denoise_irradiance(o0, textureLoad(gathered1, vec2<i32>(id), 0), n), 1.0);
+        let o1 = textureLoad(gathered1, vec2<i32>(id), 0);
+        var prior = vec4<f32>(0.0);
+        if denoise_irradiance_samples(o0) < DENOISE_SETTLED_SAMPLES {
+            prior = gi_irradiance(px.position - cameras[0].position_near.xyz, n);
+        }
+        return vec4<f32>(denoise_irradiance_with_prior(o0, o1, n, prior.rgb * PI, prior.a), 1.0);
     }
     // The gather's own signal, a texel a block, at its traced pixel's normal.
     let side = resolve_gather.x;
@@ -174,7 +189,7 @@ fn gi_resolve_pixels(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     var e = vec4<f32>(-1.0);
     if !px.remapped && resolve_view.x != GI_PROBES_VIEW && resolve_view.x != RADIANCE_CACHE_VIEW {
-        e = gathered_at(id.xy, size, px.normal);
+        e = gathered_at(id.xy, size, px);
     }
     if e.w < 0.0 {
         store(at, probes_at(px));
