@@ -22,7 +22,7 @@ draw phases and api crates.
 | `helio-gi-api` | `api/` | The GI plugin's public contract: the probe clipmap's layout, the probes and irradiance it publishes, and the WGSL that reads them. |
 | `gi_plugin` | `./` (`src/`) | The plugin's root crate: the one place it registers everything it contributes (`src/runtime.rs`: the feature set, its configuration from the project's GI settings, and the settings group). GI has no SceneDB component and no editor UI, so it has no component or editor crate. |
 | `gi-examples` | `examples/` | The GI plugin's standalone hosts on Helio: the indoor cathedral lit by the probes |
-| `helio-pass-gi` | `feature/` | Helio world-space diffuse global illumination: a probe clipmap traced through the frame's ray streams |
+| `helio-pass-gi` | `feature/` | Helio world-space diffuse global illumination: a probe clipmap and the frame's radiance cache (the publisher of `rays::radiance_cache`), traced through the frame's ray streams |
 
 - **Root crate** `gi_plugin`: the only crate that registers anything (the
   Helio feature and its settings group; GI registers nothing for the

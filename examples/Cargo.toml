@@ -3,7 +3,7 @@ name = "gi-examples"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "The GI plugin's standalone hosts on Helio: the indoor cathedral lit by the probes"
+description = "The GI plugin's standalone hosts on Helio: the indoor cathedral and an open scene (a forest by a city)"
 
 [features]
 default = ["gpu"]
@@ -12,6 +12,10 @@ gpu = []
 [[bin]]
 name = "indoor_cathedral_gi"
 path = "indoor_cathedral_gi.rs"
+
+[[bin]]
+name = "outdoor_gi"
+path = "outdoor_gi.rs"
 
 [dependencies]
 helio-light-host = { workspace = true }

@@ -1,22 +1,36 @@
 //!use frame_ray_stream
 //!use gi_common
 //!use gi_rays
-// This frame's probe rays into their probes (README.md, "The frame"), once
-// the shadow stream's tracers answered: a workgroup a probe, a lane a ray.
-// A ray's radiance is what `gi_light` and `gi_shadow` left it (`gi_pending`):
-// the rest of its light, plus its light sample's times what its shadow ray
-// let through; nothing from an inside. Projected on L1 harmonics and
+// This frame's probe rays into their probes (README.md, "The frame"): a
+// workgroup a probe, a lane a ray. A ray's radiance is what `gi_light` left
+// it (`gi_pending`): its hit lit from the radiance cache, or lit on the spot
+// where the cache has no light for it (the probes' irradiance there and its
+// own light sample through its shadow ray), or the sky; nothing from an
+// inside. Every ray is projected, on L1 harmonics over the whole sphere, and
 // blended into the probe; its distances into the probe's moments (a lane a
-// texel). A probe whose rays mostly meet insides is inside the ground (or a
-// wall). On a frame where no probe ray met anything the probes hold.
+// texel). The one hold is readiness: a probe never updated more than 1/32
+// of whose hits met cells still new (a scene loading, the eye somewhere
+// new) holds once and goes on the held list (`gi_held`), which brings it
+// back to the schedule's front once the cache has lit those cells
+// (`integrate.rs`), so its first update does not take the probes' own
+// empty state for the light there. Once: where its cells are new again by
+// then (a working set larger than the cache's slots, which churns), it
+// updates with its hits lit on the spot rather than wait for good. A probe whose rays mostly meet insides is inside the ground
+// (or a wall). On a frame where no probe ray met anything the probes hold.
 
 @group(0) @binding(0) var<uniform> frame_gi: GiFrame;
 @group(0) @binding(1) var<storage, read_write> gi_probes: array<u32>;
 @group(0) @binding(2) var<storage, read> gi_lists: array<u32>;
 @group(0) @binding(3) var<storage, read> gi_pending: array<GiPending>;
-// The shadow stream's rows as its tracers left them (`gi_shadow`).
+// The shadow stream (`radiance_cache_shadow`) as its tracers answered it:
+// what a probe's own light sample waits on.
 @group(0) @binding(4) var<storage, read> shadow_hits: array<SceneHit>;
 @group(0) @binding(5) var<storage, read> gi_answered: array<u32, 4>;
+// The probes held since the list was last read back: their count, then
+// their indices (GI_HELD places; past them a held probe waits its turn).
+@group(0) @binding(6) var<storage, read_write> gi_held: array<atomic<u32>>;
+
+override GI_HELD: u32 = 0u;
 
 const PI: f32 = 3.14159265;
 const LUMINANCE: vec3<f32> = vec3<f32>(0.2126, 0.7152, 0.0722);
@@ -25,6 +39,9 @@ var<workgroup> w_radiance: array<vec3<f32>, 64>;
 var<workgroup> w_dir: array<vec3<f32>, 64>;
 var<workgroup> w_t: array<f32, 64>;
 var<workgroup> w_inside: atomic<u32>;
+var<workgroup> w_hits: atomic<u32>;
+var<workgroup> w_waiting: atomic<u32>;
+var<workgroup> w_hold: u32;
 var<workgroup> w_answered: u32;
 
 @compute @workgroup_size(64)
@@ -33,6 +50,8 @@ fn gi_integrate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_
     if li == 0u {
         w_answered = gi_answered[0];
         atomicStore(&w_inside, 0u);
+        atomicStore(&w_hits, 0u);
+        atomicStore(&w_waiting, 0u);
     }
     // Nothing answered (no tracer has its geometry yet: a scene loading):
     // the probes keep what they hold rather than take the sky everywhere.
@@ -43,6 +62,26 @@ fn gi_integrate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_
     let far = 3.5 * spacing;
     let dir = gi_ray_dir(li, frame_gi.rotation);
     let pending = gi_pending[wg.x * GI_RAYS + li];
+    // A hit lit on the spot: its own light sample's light through its shadow
+    // ray, where it has one.
+    let spot = pending.t > 0.0 && pending.row != GI_NO_ROW;
+    if pending.t > 0.0 {
+        atomicAdd(&w_hits, 1u);
+        if spot && (pending.row & GI_ROW_WAITING) != 0u { atomicAdd(&w_waiting, 1u); }
+    }
+    let at = index * GI_PROBE_WORDS;
+    let state = gi_probes[at + GI_STATE_WORD];
+    let updates = state >> 8u;
+    workgroupBarrier();
+    if li == 0u {
+        w_hold = u32(updates == 0u && (state & GI_HELD_ONCE) == 0u && atomicLoad(&w_waiting) * 32u > atomicLoad(&w_hits));
+        if w_hold != 0u {
+            gi_probes[at + GI_STATE_WORD] = state | GI_HELD_ONCE;
+            let k = atomicAdd(&gi_held[0], 1u);
+            if k < GI_HELD { atomicStore(&gi_held[1u + k], index); }
+        }
+    }
+    if workgroupUniformLoad(&w_hold) != 0u { return; }
     var radiance = vec3<f32>(0.0);
     var t = far;
     if pending.t < 0.0 {
@@ -51,8 +90,8 @@ fn gi_integrate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_
     } else {
         if pending.t > 0.0 { t = min(pending.t, far); }
         radiance = scene_unpack_radiance(pending.rest);
-        if pending.row != GI_NO_ROW {
-            radiance += scene_unpack_radiance(pending.light) * scene_occlusion_through(shadow_hits[pending.row]);
+        if spot && (pending.row & GI_ROW_INDEX) != GI_ROW_INDEX {
+            radiance += scene_unpack_radiance(pending.light) * scene_occlusion_through(shadow_hits[pending.row & GI_ROW_INDEX]);
         }
     }
     // Fireflies: a ray meeting a surface a few centimetres from a point
@@ -71,9 +110,6 @@ fn gi_integrate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_
     w_dir[li] = dir;
     w_t[li] = t;
     workgroupBarrier();
-    let at = index * GI_PROBE_WORDS;
-    let state = gi_probes[at + GI_STATE_WORD];
-    let updates = state >> 8u;
     // Moments: a lane a texel, its nearby rays' distances.
     {
         let texel = vec2<f32>(f32(li % GI_MOMENTS_SIDE), f32(li / GI_MOMENTS_SIDE));
