@@ -232,8 +232,8 @@ fn compute(
     layout: &wgpu::PipelineLayout,
     entry: &str,
     constants: &[(&str, f64)],
-) -> wgpu::ComputePipeline {
-    helio_core::shader::create_compute_pipeline(
+) -> helio_core::shader::DeferredCompute {
+    helio_core::shader::create_compute_pipeline_deferred(
         device,
         wgpu::ComputePipelineDescriptor {
             label: Some(entry),
@@ -336,8 +336,8 @@ pub struct GiPass {
     answers: std::sync::Arc<stream::Answers>,
     state: Probes,
     layout: wgpu::BindGroupLayout,
-    reset: wgpu::ComputePipeline,
-    rays: wgpu::ComputePipeline,
+    reset: helio_core::shader::DeferredCompute,
+    rays: helio_core::shader::DeferredCompute,
     cache: helio_core::gpu_cache::GpuCache,
     /// The frame's statistics and the probe stream's count in them.
     stats: helio_core::FrameStats,
@@ -573,7 +573,7 @@ impl RenderPass for GiPass {
 /// integration, before deferred lighting.
 pub struct GiResolvePass {
     layout: wgpu::BindGroupLayout,
-    pipeline: wgpu::ComputePipeline,
+    pipeline: helio_core::shader::DeferredCompute,
     out: Option<(wgpu::Buffer, [u32; 2])>,
     /// The renderer's debug mode (`GI_PROBES_VIEW` shows the probes), and
     /// the one last written to `view`.

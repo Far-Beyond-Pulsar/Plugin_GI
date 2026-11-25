@@ -25,7 +25,7 @@ pub struct GiIntegratePass {
     /// The probe stream's answers and the shadow stream's.
     answers: [Arc<stream::Answers>; 2],
     layout: wgpu::BindGroupLayout,
-    pipeline: wgpu::ComputePipeline,
+    pipeline: helio_core::shader::DeferredCompute,
     shadow_hits: &'static str,
     cache: helio_core::gpu_cache::GpuCache,
     reads: &'static [&'static str],
