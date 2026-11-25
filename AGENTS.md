@@ -1,6 +1,6 @@
 # Plugin_GI
 
-`pulsar.gi`: world-space diffuse GI: the probe clipmap, traced through the frame's ray streams, and its settings.
+`pulsar.gi`: world-space diffuse GI: the probe clipmap and the frame's radiance cache (it publishes Helio's `rays::radiance_cache`; the probes' hits are lit from it), traced through the frame's ray streams, and their settings.
 Pulsar-Native vendors this repository at `plugins/vendor/gi`; it builds only
 inside a Pulsar-Native checkout (see `README.md`).
 

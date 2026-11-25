@@ -10,7 +10,9 @@
 // a ray from inside it meets its inside at once), 1 a
 // solid box (`a.xyz` to `b.xyz`), 2 a sheet (two-sided, at height `a.y`
 // over `a.xz` to `b.xz`, letting `b.w` of the light through), 3 a room (a
-// box seen from inside: its walls face in). Base colour and emission.
+// box seen from inside: its walls face in). Base colour (and in w the
+// coordinate space slot it is authored in: a ray sees it if it sees that
+// space) and emission.
 struct Shape {
     a: vec4<f32>,
     b: vec4<f32>,
@@ -95,6 +97,7 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
         var through = scene_occlusion_through(hits[id.x]);
         for (var k = 0u; k < tracer.info.z; k++) {
             let s = shapes[k];
+            if !scene_ray_sees_space(ray, u32(s.base.w)) { continue; }
             let m = meet(s, ray.origin, ray.dir);
             if m.t < 0.0 || m.t > ray.t_max { continue; }
             if u32(s.a.w) == 2u {
@@ -110,6 +113,7 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
     var best = none();
     var at = 0u;
     for (var k = 0u; k < tracer.info.z; k++) {
+        if !scene_ray_sees_space(ray, u32(shapes[k].base.w)) { continue; }
         let m = meet(shapes[k], ray.origin, ray.dir);
         if m.t < 0.0 || m.t >= reach { continue; }
         if best.t < 0.0 || m.t < best.t {

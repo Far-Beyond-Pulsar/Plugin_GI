@@ -16,9 +16,11 @@ const GI_PROBE_WORDS: u32 = 72u;
 const GI_STATE_WORD: u32 = 6u;
 const GI_MOMENTS_WORD: u32 = 8u;
 const GI_MOMENTS_SIDE: u32 = 8u;
-// State: bit 0 active (not inside solid ground), bits 8.. the updates it
-// has taken (saturating).
+// State: bit 0 active (not inside solid ground), bit 1 its first update
+// held once for its cells (GI's readiness), bits 8.. the updates it has
+// taken (saturating).
 const GI_ACTIVE: u32 = 1u;
+const GI_HELD_ONCE: u32 = 2u;
 
 struct GiLevel {
     // The eye-relative position of the grid's first probe (logical index
