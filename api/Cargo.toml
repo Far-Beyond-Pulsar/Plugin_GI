@@ -3,7 +3,7 @@ name = "helio-gi-api"
 version = "0.1.0"
 edition = "2021"
 description = "The GI plugin's public contract: the probe clipmap's layout, the rays, hits and irradiance it publishes, and the WGSL that reads them (a terrain that traces the probes reads it)."
-license = "MIT OR Apache-2.0"
+license = "MPL-2.0"
 
 [dependencies]
 helio-frame-api = { workspace = true }

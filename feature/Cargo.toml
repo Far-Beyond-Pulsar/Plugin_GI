@@ -3,7 +3,7 @@ name = "helio-pass-gi"
 version = "0.1.0"
 edition = "2021"
 description = "Helio world-space diffuse global illumination: a probe clipmap traced through the frame's ray streams"
-license = "MIT OR Apache-2.0"
+license = "MPL-2.0"
 
 [dependencies]
 helio-frame-api = { workspace = true }
