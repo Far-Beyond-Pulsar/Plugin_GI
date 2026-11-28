@@ -44,7 +44,12 @@ fn scene_db(device: &Arc<wgpu::Device>, queue: &Arc<wgpu::Queue>) -> pulsar_scen
         helio_light_api::MAX_LIGHTS,
         device,
     );
-    let textures = Arc::new(RwLock::new(pulsar_scenedb::gpu::TextureStore::new(64)));
+    let textures = Arc::new(RwLock::new(
+        pulsar_scenedb::gpu::TextureStore::with_reserved_slots(
+            64,
+            helio_core::TEXTURE_TABLE_RESERVED_SLOTS,
+        ),
+    ));
     let mirror = pulsar_scenedb::gpu::GpuMirrorHandle::new(Arc::new(store), queue.clone())
         .with_texture_store(textures)
         .unwrap();
